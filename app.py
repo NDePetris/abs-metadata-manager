@@ -49,7 +49,8 @@ def settings_view(store):
     st.title("Connection & settings")
     st.write("Connect to your Audiobookshelf server with an API key. Credentials stay in this session.")
     d = defaults()
-    with st.form("connection"):
+    # Widget keys belong to Streamlit; connection_result/error are application state.
+    with st.form("settings_connection_form"):
         server = st.text_input("Server URL", value=d["server"], placeholder="http://your-server:13378")
         token = st.text_input("API key", value=d["token"], type="password", help="Uses ABS_TOKEN or abs-cli config when available.")
         executable = st.text_input("abs-cli executable", value=d["executable"])
@@ -59,17 +60,24 @@ def settings_view(store):
         connect = st.form_submit_button("Connect & check compatibility", type="primary")
     if connect:
         # Invalidate the prior connection before attempting another server.
-        st.session_state.pop("adapter", None)
-        st.session_state.pop("connection", None)
-        with operation_lock(store.path), st.spinner("Checking CLI commands and reading libraries…"):
-            adapter = CliAdapter(Settings(server, token, executable, interval, timeout))
-            result = adapter.probe()
-        st.session_state["adapter"] = adapter
-        st.session_state["connection"] = result
-        st.success("Connected. Select an audiobook library below.")
-    connection = st.session_state.get("connection")
+        for key in ("adapter", "connection_result", "connection_error", "library", "library_choice"):
+            st.session_state.pop(key, None)
+        try:
+            with operation_lock(store.path), st.spinner("Checking CLI commands and reading libraries…"):
+                adapter = CliAdapter(Settings(server, token, executable, interval, timeout))
+                result = adapter.probe()
+            st.session_state["adapter"] = adapter
+            st.session_state["connection_result"] = result
+        except (AdapterError, BusyError, ValueError, KeyError) as exc:
+            st.session_state["connection_error"] = str(exc)
+        # Refresh the sidebar too, including when replacing a successful connection fails.
+        st.rerun()
+    if error := st.session_state.get("connection_error"):
+        st.error(error)
+    connection = st.session_state.get("connection_result")
     adapter = st.session_state.get("adapter")
     if connection and adapter:
+        st.success("Connected. Select an audiobook library below.")
         st.write(f"**Server:** {adapter.server} · **ABS:** {connection['server_version']} · "
                  f"**abs-cli:** {connection['cli_version']}")
         for warning in connection["warnings"]:
@@ -77,13 +85,14 @@ def settings_view(store):
         libraries = [lib for lib in connection["libraries"] if lib.get("mediaType") == "book"]
         if libraries:
             ids = [lib["id"] for lib in libraries]
-            chosen = st.selectbox("Book library", ids, index=ids.index(d["library"]) if d["library"] in ids else 0,
+            saved_library = st.session_state.get("library", {}).get("id", d["library"])
+            chosen = st.selectbox("Book library", ids, index=ids.index(saved_library) if saved_library in ids else 0,
                                   format_func=lambda key: next(lib["name"] for lib in libraries if lib["id"] == key),
                                   key="library_choice")
             st.session_state["library"] = next(lib for lib in libraries if lib["id"] == chosen)
             st.caption("ABS uses mediaType=book for audiobooks and ebooks. Audio items are writable; ebooks stay read-only.")
         if st.button("Disconnect"):
-            for key in ("adapter", "connection", "library"):
+            for key in ("adapter", "connection_result", "connection_error", "library"):
                 st.session_state.pop(key, None)
             st.rerun()
     st.divider()
@@ -98,6 +107,10 @@ def settings_view(store):
             flash("Imported a read-only snapshot. Run a fresh live audit before approving corrections.")
 
 
+def remember_snapshot():
+    st.session_state["snapshot_choice"] = st.session_state["snapshot_widget"]
+
+
 def choose_snapshot(store):
     audits = store.audits()
     if not audits:
@@ -108,7 +121,9 @@ def choose_snapshot(store):
     if "snapshot_choice" not in st.session_state or st.session_state["snapshot_choice"] not in choices:
         latest = store.latest(adapter.server, library["id"]) if adapter and library else None
         st.session_state["snapshot_choice"] = latest["id"] if latest else choices[0]
-    aid = st.selectbox("Audit snapshot", choices, key="snapshot_choice",
+    # Keep the selected snapshot when Streamlit cleans up widgets on Settings/History.
+    st.session_state["snapshot_widget"] = st.session_state["snapshot_choice"]
+    aid = st.selectbox("Audit snapshot", choices, key="snapshot_widget", on_change=remember_snapshot,
                        format_func=lambda i: next(f"#{i} · {a['name']} · {a['started'][:16]} UTC · "
                                                  f"{a['status']} · {a['books']} books"
                                                  for a in audits if a["id"] == i))
