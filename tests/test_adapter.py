@@ -155,6 +155,57 @@ class LocalABS(BaseHTTPRequestHandler):
         self.reply({"updated": True, "libraryItem": self.server.book})
 
 
+def test_official_cli_metadata_search_get_only(tmp_path):
+    from urllib.parse import parse_qs, urlsplit
+
+    from abs_manager.sources import AbsSource
+    from abs_manager.verification_workflow import run_verification, start_verification
+
+    executable = detect_cli()
+    if not Path(executable).is_file():
+        pytest.skip("Install official abs-cli 1.2.0 for read-only search protocol test")
+
+    class MetadataABS(LocalABS):
+        def do_GET(self):
+            self.server.requests.append(("GET", self.path))
+            if self.path == "/api/search/providers":
+                self.reply({"providers": {"books": [{"value": "audible", "text": "Audible"}]}})
+            elif self.path.startswith("/api/search/books?"):
+                query = parse_qs(urlsplit(self.path).query)
+                assert query["provider"] == ["audible"]
+                self.reply([{"title": "Example", "author": "Author", "narrator": "Narrator", "duration": 20,
+                             "url": "https://example.invalid/recording"}])
+            elif self.path == "/status":
+                self.reply({"serverVersion": "2.37.1"})
+            else:
+                self.reply({}, 404)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), MetadataABS)
+    server.requests = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        adapter = CliAdapter(Settings(f"http://127.0.0.1:{server.server_port}", "synthetic-only", executable, .1, 10))
+        assert adapter.metadata_providers()[0]["value"] == "audible"
+        store = Store(tmp_path / "search.sqlite3")
+        aid = store.start_audit(adapter.server, "library-a", "Test")
+        store.add_book(aid, Book(make_book()))
+        store.finish_audit(aid)
+        source = AbsSource(adapter, "audible")
+        rid = start_verification(store, aid, source, ["current-id"])
+        run_verification(store, rid, source)
+        captured = store.verification_evidence(aid, "current-id")[0]
+        assert captured["state"] == "ok"
+        assert captured["candidates"][0]["duration"] == 1200
+        assert all(r[0] == "GET" for r in server.requests)
+        assert any(r[1].startswith("/api/search/books?") for r in server.requests)
+        assert not store.history()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(3)
+
+
 def test_official_cli_against_local_http_simulator(tmp_path):
     executable = detect_cli()
     if not Path(executable).is_file():

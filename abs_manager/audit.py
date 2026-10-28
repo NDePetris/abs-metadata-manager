@@ -88,7 +88,7 @@ def analyze(book: Book) -> tuple[dict, list[Finding]]:
             return
         findings.append(Finding(field, kind, current.get(field), proposed, confidence, reason, evidence, actionable))
 
-    for field in ("title", "authors", "narrators"):
+    for field in (("title", "authors", "narrators") if book.is_audio else ("title", "authors")):
         if not current[field]:
             note(field, "missing", "Missing metadata. Verify the recording and contributor roles before editing.")
     if not current["subtitle"]:
@@ -163,7 +163,7 @@ def analyze(book: Book) -> tuple[dict, list[Finding]]:
             note("series", "missing", "Series position missing. Folder alone does not authorize a replacement.")
     if seq and folder["sequence"] and seq != folder["sequence"]:
         note("series", "conflict", "Folder position differs. Existing series data is retained; investigate.")
-    if sname and folder["series"] and canon(sname) != canon(SERIES_ALIASES.get(folder["series"], folder["series"])):
+    if book.is_audio and sname and folder["series"] and canon(sname) != canon(SERIES_ALIASES.get(folder["series"], folder["series"])):
         note("series", "conflict", "Folder series differs from observed metadata; no overwrite proposed.")
 
     authors = ["Sarah J. Maas" if person_key(a) == "sarahjmaas" else a for a in current["authors"]]
@@ -182,7 +182,9 @@ def analyze(book: Book) -> tuple[dict, list[Finding]]:
     if folder["narrator_credit"] and current["narrators"] and canon(folder["narrator_credit"]) != canon(
             ", ".join(current["narrators"])):
         note("narrators", "conflict", "Folder credit differs. Edition-specific live narrator credits are retained.")
-    if folder["title"] and clean and canon(folder["title"]) != canon(clean):
+    # Calibre folder names carry numeric IDs and may truncate or sanitize any title.
+    # They cannot establish a title discrepancy or a series hierarchy for ebooks.
+    if book.is_audio and folder["title"] and clean and canon(folder["title"]) != canon(clean):
         note("title", "suspicious", "Folder title differs; it may represent another edition or a legitimate subtitle.")
     embedded_title = embedded.get("title")
     if isinstance(embedded_title, str) and canon(embedded_title) not in (canon(title), canon(clean)):
@@ -198,4 +200,11 @@ def analyze(book: Book) -> tuple[dict, list[Finding]]:
             note("chapters", "missing", "No chapters exposed by ABS. Never invent timings.")
         elif chapters and any(re.fullmatch(r"(?:chapter|track|part)\s*\d+", c.get("title", ""), re.IGNORECASE) for c in chapters):
             note("chapters", "informational", "Generic chapter labels can be legitimate. No changes proposed.")
+    # Overlapping rules must never offer competing actionable targets for one field.
+    for field in {f.field for f in findings if f.actionable}:
+        competing = [f for f in findings if f.field == field and f.actionable]
+        if len(competing) > 1:
+            for finding in competing:
+                finding.actionable = False
+                finding.reason += " Overlapping rules require a single manual proposal after review."
     return normalized, findings

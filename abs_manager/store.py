@@ -9,7 +9,7 @@ from pathlib import Path
 from .audit import analyze
 from .diagnostics import event, local_log
 from .locking import operation_lock
-from .models import Book, compact, validate_target
+from .models import Book, compact, digest, validate_target
 
 
 def now() -> str:
@@ -41,6 +41,23 @@ class Store:
                     item_id TEXT NOT NULL, action TEXT NOT NULL, state TEXT NOT NULL,
                     created TEXT NOT NULL, updated TEXT NOT NULL, data TEXT NOT NULL,
                     message TEXT NOT NULL DEFAULT '', observed TEXT);
+                CREATE TABLE IF NOT EXISTS verification_runs (
+                    id INTEGER PRIMARY KEY, audit_id INTEGER NOT NULL REFERENCES audits(id),
+                    source TEXT NOT NULL, scope TEXT NOT NULL, state TEXT NOT NULL,
+                    created TEXT NOT NULL, updated TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS verification_lookups (
+                    id INTEGER PRIMARY KEY, cache_key TEXT NOT NULL, source TEXT NOT NULL,
+                    scope TEXT NOT NULL, captured TEXT NOT NULL, data TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS verification_cache ON verification_lookups(cache_key,id);
+                CREATE TABLE IF NOT EXISTS verification_tasks (
+                    run_id INTEGER NOT NULL REFERENCES verification_runs(id), item_id TEXT NOT NULL,
+                    query TEXT NOT NULL, cache_key TEXT NOT NULL, lookup_id INTEGER REFERENCES verification_lookups(id),
+                    PRIMARY KEY(run_id,item_id));
+                CREATE TABLE IF NOT EXISTS verification_annotations (
+                    audit_id INTEGER NOT NULL REFERENCES audits(id), item_id TEXT NOT NULL,
+                    field TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(audit_id,item_id,field));
+                CREATE TABLE IF NOT EXISTS calibre_catalogs (
+                    audit_id INTEGER PRIMARY KEY REFERENCES audits(id), data TEXT NOT NULL);
             """)
             columns = {row[1] for row in db.execute("PRAGMA table_info(audits)")}
             for name, kind in (("membership", "TEXT"), ("library_identity", "TEXT"), ("expected", "INTEGER"),
@@ -234,3 +251,59 @@ class Store:
 
     def unresolved(self, server):
         return [r for r in self.history(server) if r["state"] in ("prepared", "applied", "uncertain")]
+
+    def verification_runs(self, audit_id):
+        return self.rows("SELECT r.*, COUNT(t.item_id) AS total, COUNT(t.lookup_id) AS done "
+                         "FROM verification_runs r LEFT JOIN verification_tasks t ON t.run_id=r.id "
+                         "WHERE r.audit_id=? GROUP BY r.id ORDER BY r.id DESC", (audit_id,))
+
+    def verification_evidence(self, audit_id, item_id):
+        rows = self.rows("SELECT l.data FROM verification_tasks t JOIN verification_runs r ON r.id=t.run_id "
+                         "JOIN verification_lookups l ON l.id=t.lookup_id WHERE r.audit_id=? AND t.item_id=? "
+                         "ORDER BY r.id DESC", (audit_id, item_id))
+        latest = {}
+        for row in rows:
+            data = json.loads(row["data"])
+            latest.setdefault((data["source"], data["scope"]), data)
+        return list(latest.values())
+
+    def verification_annotations(self, audit_id, item_id):
+        return {r["field"]: json.loads(r["data"]) for r in self.rows(
+            "SELECT field,data FROM verification_annotations WHERE audit_id=? AND item_id=?", (audit_id, item_id))}
+
+    def annotate_verification(self, audit_id, item_id, field, evidence, *, candidate_id=None):
+        from .verification import QUALITY_FIELDS
+        if field not in (*QUALITY_FIELDS, "edition") or not evidence.strip():
+            raise ValueError("Select a field and provide review evidence.")
+        with operation_lock(self.path):
+            book = self.book(audit_id, item_id)
+            data = {"date": now(), "evidence": evidence, "kind": "human review", "value_digest": digest(book.raw)}
+            if field == "edition":
+                candidates = [c for lookup in self.verification_evidence(audit_id, item_id)
+                              for c in lookup.get("candidates", [])]
+                if candidate_id not in {c["id"] for c in candidates}:
+                    raise ValueError("Select a captured candidate.")
+                data["candidate_id"] = candidate_id
+            with self.connect() as db:
+                db.execute("INSERT OR REPLACE INTO verification_annotations VALUES(?,?,?,?)",
+                           (audit_id, item_id, field, compact(data)))
+
+    def verification_report(self, audit_id):
+        from .verification import assess
+        if self.audit(audit_id)["status"] != "complete":
+            raise ValueError("Verification requires a completed audit snapshot.")
+        catalogs = self.rows("SELECT data FROM calibre_catalogs WHERE audit_id=?", (audit_id,))
+        catalog = json.loads(catalogs[0]["data"]) if catalogs else {}
+        result = []
+        for book in self.books(audit_id):
+            annotations = self.verification_annotations(audit_id, book.id)
+            result.append(assess(book, self.verification_evidence(audit_id, book.id), reviews=annotations,
+                                 selected=annotations.get("edition", {}).get("candidate_id"),
+                                 calibre=catalog.get(book.id)))
+        return result
+
+    def cancel_verification(self, run_id):
+        # A cancellation signal must be writable while the operation holder is making a read request.
+        with self.connect() as db:
+            db.execute("UPDATE verification_runs SET state='cancelled', updated=? WHERE id=? "
+                       "AND state!='complete'", (now(), run_id))

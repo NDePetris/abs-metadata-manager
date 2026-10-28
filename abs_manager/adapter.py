@@ -54,7 +54,8 @@ class CliAdapter:
     def _run(self, args: list[str], body: str | None = None, parse: bool = True, validate=None):
         # Positive allowlist: mutations (including rollback's update) always get ONE attempt.
         readonly = body is None and tuple(args[:2]) in {
-            ("libraries", "list"), ("items", "list"), ("items", "get")}
+            ("libraries", "list"), ("items", "list"), ("items", "get"),
+            ("metadata", "providers"), ("metadata", "search")}
         mutation = args[:2] == ["items", "update"] and "--stdin" in args
         operation = " ".join(args[:2]) if args[0] != "--version" else "version"
         target = {}
@@ -194,6 +195,31 @@ class CliAdapter:
         Book(response)  # Reject minified schemas before auditing or updating.
         return response
 
+    def metadata_providers(self) -> list[dict]:
+        response = self._run(["metadata", "providers"])
+        try:
+            providers = response["providers"]["books"]
+            if not isinstance(providers, list) or not all(
+                    isinstance(p, dict) and isinstance(p.get("value"), str) and p["value"] for p in providers):
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            raise AdapterError("Unexpected metadata provider schema.") from None
+        return sorted(providers, key=lambda p: (not any(
+            x in (p["value"] + p.get("text", "")).lower() for x in ("audible", "audnexus")), p["value"]))
+
+    def metadata_search(self, provider: str, query: dict) -> list[dict]:
+        if not provider or not query.get("title"):
+            raise ValueError("Select a discovered provider and a nonempty title/ASIN.")
+        args = ["metadata", "search", "--provider", provider, "--title", query["title"]]
+        if query.get("author"):
+            args += ["--author", query["author"]]
+        response = self._run(args)
+        if not isinstance(response, list):
+            raise AdapterError("Unexpected metadata search schema (expected candidate array).")
+        if not all(isinstance(row, dict) for row in response):
+            raise AdapterError("Invalid metadata search candidate.")
+        return response
+
     @staticmethod
     def _schema(response, key):
         if not isinstance(response, dict) or not isinstance(response.get(key), list):
@@ -219,6 +245,55 @@ def item_identity(row: dict) -> dict:
             or row.get("mediaType") != "book"):
         raise AdapterError("Inventory lacks a verifiable book identity/path; run a fresh audit.")
     return {key: row.get(key) for key in ("id", "libraryId", "path", "relPath", "ino", "mediaType")}
+
+
+class PublicMetadataTransport:
+    """GET-only documented bibliographic APIs. No ABS credentials enter this transport."""
+
+    def __init__(self, google_key="", contact="", timeout=20):
+        self.google_key, self.timeout = google_key, timeout
+        self.agent = "abs-metadata-manager/0.2 (personal metadata review" + ("; " + contact if contact else "") + ")"
+        self._last = 0.0
+
+    def public_search(self, source, query):
+        if source not in ("openlibrary", "googlebooks"):
+            raise ValueError("Unsupported source.")
+        if source == "googlebooks" and not self.google_key:
+            raise AdapterError("Google Books requires a configured API key; ABS and Open Library need none.")
+        url = {"openlibrary": "https://openlibrary.org/search.json",
+               "googlebooks": "https://www.googleapis.com/books/v1/volumes"}[source]
+        params = dict(query)
+        if source == "openlibrary":
+            params.update(limit=10, fields="key,title,author_name")
+        else:
+            params.update(maxResults=10, key=self.google_key)
+        for attempt in range(3):
+            time.sleep(max(0, 1.5 - (time.monotonic() - self._last)))
+            self._last = time.monotonic()
+            try:
+                response = requests.get(url, params=params, headers={"User-Agent": self.agent},
+                                        timeout=self.timeout, allow_redirects=False)
+                if response.status_code in (429, 502, 503, 504):
+                    # Long Retry-After values stop this action instead of ignoring the server's request.
+                    retry_after = response.headers.get("Retry-After", "")
+                    if retry_after and (not retry_after.isdigit() or int(retry_after) > 30):
+                        raise AdapterError("Provider rate limited/unavailable; retry later explicitly.")
+                    if attempt < 2:
+                        time.sleep(max(2 ** attempt, int(retry_after or 0)))
+                        continue
+                response.raise_for_status()
+                result = response.json()
+                if not isinstance(result, dict):
+                    raise TypeError
+                return result
+            except (requests.Timeout, requests.ConnectionError):
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise AdapterError("Public provider unavailable: timeout/connection failure after three read attempts.") from None
+            except (requests.RequestException, ValueError, TypeError):
+                # requests exceptions can include the URL/API key. Never propagate them.
+                raise AdapterError("Public provider unavailable: HTTP failure, rate limit, or invalid response.") from None
 
 
 def membership(adapter: Adapter, library: str, progress: Callable = lambda *args: None, limit=50) -> dict:

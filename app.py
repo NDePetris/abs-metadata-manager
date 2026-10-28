@@ -15,6 +15,7 @@ from abs_manager.locking import BusyError, operation_lock
 from abs_manager.models import FIELDS, compact
 from abs_manager.sample import sample_audit
 from abs_manager.store import Store
+from abs_manager.verification_ui import verification_view
 from abs_manager.workflow import (
     SafetyError,
     Workflow,
@@ -452,14 +453,15 @@ def main():
     store = Store(os.getenv("ABS_MM_DB", str(ROOT / "data" / "metadata.sqlite3")))
     with st.sidebar:
         st.header("Metadata Manager")
-        page = st.radio("Workspace", ["Library", "Review", "Apply", "History", "Settings"])
+        page = st.radio("Workspace", ["Library", "Verification", "Review", "Apply", "History", "Settings"])
         adapter = st.session_state.get("adapter")
         st.caption(f"Connected · {adapter.server}" if adapter else "Local workspace · disconnected")
         st.divider()
         st.caption("Audit → Review → Preview → Confirm → Verify")
     if message := st.session_state.pop("flash", None):
         st.success(message)
-    views = {"Library": library_view, "Review": review_view, "Apply": apply_view,
+    views = {"Library": library_view, "Verification": lambda s: verification_view(s, choose_snapshot),
+             "Review": review_view, "Apply": apply_view,
              "History": history_view, "Settings": settings_view}
     try:
         views[page](store)
