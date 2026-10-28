@@ -106,7 +106,8 @@ class Workflow:
                     live = Book(self.adapter.item(identity["id"]))
                     guard(live, identity, group["before"])
                 except Exception as exc:
-                    self.store.record(plan["server"], plan["library"], identity["id"], "apply", "skipped",
+                    self.store.record(plan["server"], plan["library"], identity["id"], "apply",
+                                      "skipped" if isinstance(exc, SafetyError) else "failed",
                                       group, "Live validation failed. No update submitted; run a fresh audit.")
                     raise SafetyError("Live validation failed. Batch stopped without updating this book.") from exc
                 after = {**live.values, **group["changes"]}

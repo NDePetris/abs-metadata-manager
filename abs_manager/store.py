@@ -75,6 +75,9 @@ class Store:
             db.execute("INSERT INTO books VALUES(?,?,?,?)", (audit_id, book.id, compact(book.raw), compact(normalized)))
             for finding in findings:
                 f = finding.to_dict()
+                if not book.is_audio:
+                    f["actionable"] = False
+                    f["reason"] = "Ebook read-only; Calibre remains authoritative. " + f["reason"]
                 db.execute("INSERT INTO findings(audit_id,item_id,field,kind,current,proposed,confidence,reason,"
                            "evidence,actionable,target) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                            (audit_id, book.id, f["field"], f["kind"], compact(f["current"]), compact(f["proposed"]),

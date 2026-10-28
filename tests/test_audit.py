@@ -34,6 +34,7 @@ def test_folder_parsing(leaf, title, seq):
     ("Children of Time (Unabridged)", "Children of Time", "Children of Time"),
     ("The Wheel of Time Book 6 - Lord of Chaos", "The Wheel of Time", "Lord of Chaos"),
     ("Bobiverse, Book 4: Heaven's River", "Bobiverse", "Heaven's River"),
+    ("A Title: Its Real Subtitle: Bobiverse, Book 4", "Bobiverse", "A Title: Its Real Subtitle"),
 ])
 def test_title_rules(title, series, expected):
     assert proposals(make_book(title=title, series=series))["title"] == expected
@@ -42,6 +43,13 @@ def test_title_rules(title, series, expected):
 @pytest.mark.parametrize("title", ["A History: The Meaning of Everything", "1984", "11/22/63", "The Law"])
 def test_legitimate_titles_preserved(title):
     assert "title" not in proposals(make_book(title=title, series="Other Series"))
+
+
+@pytest.mark.parametrize("title", ["  A Legitimate Title  ", "A  Legitimate Title"])
+def test_harmless_whitespace_is_informational(title):
+    raw = make_book(title=title, series=None)
+    assert "title" not in proposals(raw)
+    assert any(f.kind == "formatting" and not f.actionable for f in analyze(Book(raw))[1])
 
 
 def test_dresden_and_canonical_author():

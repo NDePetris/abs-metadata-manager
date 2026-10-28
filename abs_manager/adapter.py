@@ -48,7 +48,7 @@ class CliAdapter:
         env = dict(os.environ, ABS_SERVER=self.server, ABS_TOKEN=self.settings.token, ABS_DEBUG="0")
         try:
             result = subprocess.run(
-                [self.settings.executable, *args], input=body, capture_output=True,
+                [self.settings.executable, *args], input=body, capture_output=True, check=False,
                 text=True, encoding="utf-8", errors="replace", env=env,
                 timeout=self.settings.timeout, shell=False,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,

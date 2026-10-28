@@ -35,7 +35,7 @@ def test_no_approval_or_confirmation_no_writes(setup):
 
 
 def test_persistent_decisions_and_edits(setup):
-    store, api, aid = setup
+    store, _api, aid = setup
     fid = next(f["id"] for f in store.findings(aid) if f["actionable"])
     store.review([fid], "approved", edited="Custom Title: Real Subtitle")
     reopened = Store(store.path)
@@ -254,10 +254,13 @@ def test_ebooks_are_readonly(setup):
     raw = make_book(item_id="epub")
     raw["media"].update(audioFiles=[], duration=0, ebookFile={"metadata": {"ext": ".epub"}})
     store.add_book(aid, Book(raw))
-    fid = next(f["id"] for f in store.findings(aid) if f["item_id"] == "epub" and f["actionable"])
-    store.review([fid], "approved")
-    with pytest.raises(SafetyError, match="Ebooks"):
-        preview(store, aid)
+    findings = [f for f in store.findings(aid) if f["item_id"] == "epub"]
+    assert findings and not any(f["actionable"] for f in findings)
+    with pytest.raises(ValueError):
+        store.review([findings[0]["id"]], "approved")
+    with pytest.raises(ValueError):
+        store.propose(aid, "epub", "title", "New title", "Never edit ebooks")
+    assert not preview(store, aid)["books"]
     assert not api.writes
 
 

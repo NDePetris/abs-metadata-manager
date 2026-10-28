@@ -16,6 +16,16 @@ HP = {str(i): "Harry Potter and " + name for i, name in enumerate([
 SERIES_ALIASES = {"Dresden Files": "The Dresden Files", "Chidren of Time": "Children of Time"}
 
 
+def embedded_title_key(value, series_name):
+    if not isinstance(value, str):
+        return ""
+    value = re.sub(r"\s*\(Unabridged\)\s*$", "", value, flags=re.IGNORECASE)
+    if series_name:
+        value = re.sub(r":\s*" + re.escape(series_name) + r",\s*Book\s+\d+(?:\.\d+)?\s*$", "", value,
+                       flags=re.IGNORECASE)
+    return canon(value)
+
+
 @dataclass
 class Finding:
     field: str
@@ -87,13 +97,14 @@ def analyze(book: Book) -> tuple[dict, list[Finding]]:
 
     sname = series[0]["name"] if len(series) == 1 else ""
     seq = sequence(series[0]["sequence"]) if len(series) == 1 else None
-    clean = re.sub(r"\s*\(Unabridged\)\s*$", "", title, flags=re.IGNORECASE).strip()
+    clean = re.sub(r"\s*\(Unabridged\)\s*$", "", title, flags=re.IGNORECASE)
     title_reasons = []
     if clean != title:
+        clean = clean.strip()
         title_reasons.append("Remove the terminal Unabridged edition label.")
 
     # Match a series suffix precisely; do not strip legitimate title: subtitle punctuation.
-    suffix = re.search(r":\s*(.+?),\s*Book\s+(\d+(?:\.\d+)?)\s*$", clean, re.IGNORECASE)
+    suffix = re.search(r":\s*([^:]+?),\s*Book\s+(\d+(?:\.\d+)?)\s*$", clean, re.IGNORECASE)
     if suffix and (not sname or canon(suffix[1]) == canon(sname)):
         clean = clean[:suffix.start()].strip()
         title_reasons.append("Move the explicit series and book-number suffix out of the title.")
@@ -111,8 +122,8 @@ def analyze(book: Book) -> tuple[dict, list[Finding]]:
         if numbered:
             candidate = numbered[2].strip()
             corroborated = (canon(candidate) == canon(folder["title"]) and
-                            canon(candidate) in {canon(str(embedded.get("title", ""))),
-                                                 canon(str(embedded.get("album", "")))})
+                            canon(candidate) in {embedded_title_key(embedded.get("title"), sname),
+                                                 embedded_title_key(embedded.get("album"), sname)})
             if sequence(numbered[1]) == seq or corroborated:
                 clean = candidate
                 title_reasons.append("Number prefix matches series position or folder plus embedded title.")
@@ -143,8 +154,8 @@ def analyze(book: Book) -> tuple[dict, list[Finding]]:
     elif len(series) == 1 and seq is None and folder["sequence"]:
         folder_series = SERIES_ALIASES.get(folder["series"], folder["series"])
         title_agrees = canon(clean) == canon(folder["title"])
-        tag_agrees = canon(clean) in {canon(str(embedded.get("title", ""))),
-                                     canon(str(embedded.get("album", "")))}
+        tag_agrees = canon(clean) in {embedded_title_key(embedded.get("title"), sname),
+                                     embedded_title_key(embedded.get("album"), sname)}
         if folder_series == sname and title_agrees and tag_agrees:
             note("series", "missing", "Position missing; folder and embedded title corroborate this book.",
                  [{"name": sname, "sequence": folder["sequence"]}], "medium", True)
@@ -156,6 +167,8 @@ def analyze(book: Book) -> tuple[dict, list[Finding]]:
         note("series", "conflict", "Folder series differs from observed metadata; no overwrite proposed.")
 
     authors = ["Sarah J. Maas" if person_key(a) == "sarahjmaas" else a for a in current["authors"]]
+    normalized["authors"] = authors
+    normalized["series"] = [{**s, "sequence": sequence(s["sequence"])} for s in normalized_series]
     if authors != current["authors"]:
         note("authors", "formatting", "Canonical Sarah J. Maas initials; other authors are retained.", authors, "high", True)
     hp_record = sname == "Harry Potter" or title.startswith("Harry Potter and ")
