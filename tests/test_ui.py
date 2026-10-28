@@ -76,3 +76,20 @@ def test_ui_approve_preview_confirm_verify_and_guarded_rollback(tmp_path, monkey
     assert any(row["state"] == "reverted" for row in store.history())
     at.run()
     assert len(api.writes) == 2
+
+
+def test_editing_an_approved_field_defaults_back_to_pending(setup, monkeypatch):
+    store, api, aid = setup
+    monkeypatch.setenv("ABS_MM_DB", store.path)
+    fid = next(f["id"] for f in store.findings(aid) if f["actionable"])
+    store.review([fid], "approved")
+    at = AppTest.from_file(str(APP), default_timeout=30).run()
+    navigate(at, "Review")
+    assert widget(at, "selectbox", "Decision").value == "pending"
+    widget(at, "text_area", "Edit proposed value").set_value("A separately reviewed title")
+    widget(at, "button", "Save field decision").click().run()
+    assert not at.exception
+    saved = next(f for f in store.findings(aid) if f["id"] == fid)
+    assert saved["target"] == "A separately reviewed title"
+    assert saved["status"] == "pending"
+    assert not api.writes
