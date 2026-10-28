@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-28T13:56:58Z",
+  "title": "Design System: Audiobookshelf Metadata Manager",
+  "extensions": {
+    "colorMeta": {
+      "primary": { "role": "primary", "displayName": "Deep green" },
+      "background": { "role": "neutral", "displayName": "Light background" },
+      "secondary-background": { "role": "neutral", "displayName": "Muted secondary background" },
+      "text": { "role": "neutral", "displayName": "Dark text" }
+    },
+    "typographyMeta": {
+      "body": { "displayName": "Native Streamlit sans serif", "purpose": "Framework-configured family; sizes and weights remain native." }
+    },
+    "shadows": [],
+    "motion": [],
+    "breakpoints": [],
+    "implementation": {
+      "framework": "Streamlit",
+      "themeBase": "light",
+      "pageLayout": "wide",
+      "initialSidebarState": "auto",
+      "sourceFiles": ["app.py", ".streamlit/config.toml"],
+      "screenshotEvidence": [".impeccable/review/desktop.jpg", ".impeccable/review/review-desktop.jpg", ".impeccable/review/user-663.jpg"],
+      "componentDocumentation": "Components are native Streamlit runtime controls. No app-owned HTML/CSS component definitions exist to extract; replicas and inferred framework tokens are intentionally omitted.",
+      "tokenScope": "Only actual configured primitives are recorded in DESIGN.md. No tonal ramps are synthesized because the user requested extraction of actual theme values only.",
+      "layoutFacts": [
+        "Full-width dataframes hide row indices.",
+        "Library inspector and cover use 2:1 columns.",
+        "Review filters use three equal columns.",
+        "Current/proposed values and decision actions use two equal columns."
+      ],
+      "nativeComponents": [
+        "Sidebar radio navigation with connection caption",
+        "Search and filtered dataframes with record selectboxes",
+        "Labeled text, select, checkbox, and number inputs",
+        "Primary and default buttons with prerequisite disabled states",
+        "Forms for field decisions and exact confirmations",
+        "JSON/code inspectors and disclosure expanders",
+        "Information, warning, success, error, progress, and spinner components"
+      ]
+    }
+  },
+  "components": [],
+  "narrative": {
+    "northStar": null,
+    "overview": "The design follows the confirmed brief: a practical desktop workspace built with native Streamlit components. Searchable metadata tables, full field inspectors, clear saved decisions, and explicit confirmation take priority over visual polish. There is no separate brand metaphor.\n\nThe implementation uses Streamlit's light theme and standard component hierarchy. Connection state, snapshot provenance, read-only restrictions, and operation results appear alongside the work they explain. Review, confirmation, and recovery have distinct views.",
+    "keyCharacteristics": [
+      "Dense, searchable tables with inspectors below them.",
+      "Native controls, typography, messages, forms, and expanders.",
+      "Visible provenance and approval status.",
+      "Exact before/after previews and separately confirmed recovery actions."
+    ],
+    "rules": [
+      { "name": "The Native Hierarchy Rule", "body": "Use the existing Streamlit text roles rather than introducing custom display typography.", "section": "typography" }
+    ],
+    "dos": [
+      "Do use native Streamlit components and its configured light theme.",
+      "Do preserve searchable tables and complete selected-record inspectors.",
+      "Do show provenance, saved decisions, read-only state, and blocking requirements in text.",
+      "Do keep exact previews and explicit confirmation together.",
+      "Do present reconciliation and rollback separately from approval and Apply."
+    ],
+    "donts": [
+      "Don't add custom CSS, decorative assets, generated design comps, animation, or a separate mobile UI.",
+      "Don't invent custom font, spacing, radius, shadow, or breakpoint tokens from framework defaults.",
+      "Don't replace detailed metadata review with decorative cards or imagery.",
+      "Don't make approval status depend only on color or imply that editing a value automatically approves it."
+    ]
+  }
+}

@@ -1,0 +1,13 @@
+.venv/
+.tools/
+data/
+.env
+*.sqlite*
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+tests/fixtures/private/
+.impeccable/review/
+.impeccable/cache/
+*.log
+*.egg-info/
