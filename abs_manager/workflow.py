@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 
-from .adapter import Adapter, inventory
+from .adapter import Adapter, AdapterError, CliAdapter, InventoryChanged, inventory, membership
+from .diagnostics import event
 from .locking import operation_lock
 from .models import Book, digest, payload
 from .store import Store
@@ -12,21 +14,107 @@ class SafetyError(RuntimeError):
     pass
 
 
-def run_audit(store: Store, adapter: Adapter, library: dict, progress: Callable = lambda *args: None) -> int:
+def library_identity(library: dict) -> dict:
+    return {"id": library["id"], "name": library["name"], "mediaType": library.get("mediaType"),
+            "folders": sorted(library.get("folders", []), key=lambda folder: json.dumps(folder, sort_keys=True))}
+
+
+def resume_unavailable(store: Store, audit: dict, server: str, library: dict) -> str | None:
+    """Local eligibility only. Remote membership is rechecked inside the explicit Resume action."""
+    if audit["server"] != server or audit["library"] != library["id"]:
+        return "Connect to the original server and select the original library."
+    if audit["read_only"] or audit["status"] not in ("running", "interrupted"):
+        return "Only an interrupted live audit can be resumed."
+    if store.latest(server, library["id"])["id"] != audit["id"]:
+        return "A newer audit exists. Resume its saved progress or start a fresh audit."
+    if audit["resume_blocked"]:
+        return audit["resume_blocked"]
+    if audit["library_identity"] is None or (audit["membership"] is None and store.saved_progress(audit["id"])):
+        return ("This older audit has no membership checkpoint, so unchanged membership cannot be verified. "
+                "Start a fresh audit once; its interruptions will be resumable. Saved history is retained.")
+    if json.loads(audit["library_identity"]) != library_identity(library):
+        return "Library identity or folders changed. Start a fresh audit."
+    return None
+
+
+def run_audit(store: Store, adapter: Adapter, library: dict, progress: Callable = lambda *args: None,
+              *, resume_id: int | None = None, diagnostic: Callable = lambda record: None) -> int:
     with operation_lock(store.path):
         if library.get("mediaType") != "book":
             raise SafetyError("Select a book library.")
-        live_libraries = adapter.libraries()
-        if not any(lib["id"] == library["id"] for lib in live_libraries):
-            raise SafetyError("Selected library no longer exists.")
-        audit_id = store.start_audit(adapter.server, library["id"], library["name"])
+        if resume_id is not None:
+            audit = store.audit(resume_id)
+            if reason := resume_unavailable(store, audit, adapter.server, library):
+                raise SafetyError(reason)
+            audit_id = resume_id
+        else:
+            audit_id = store.start_audit(adapter.server, library["id"], library["name"],
+                                         library_identity=library_identity(library))
+        previous_diagnostic, previous_log = None, None
+        if isinstance(adapter, CliAdapter):
+            previous_diagnostic, previous_log = adapter.diagnostic, adapter.log
+
+            def report(record):
+                store.request_diagnostic(audit_id, record)
+                diagnostic(record)
+
+            adapter.diagnostic, adapter.log = report, store.log
+
+        def saved_progress(done, total, text):
+            saved_count = store.saved_progress(audit_id)
+            event(store.log, audit_id=audit_id, saved=saved_count, expected=total)
+            progress(saved_count, total, text)
+
         try:
-            for book in inventory(adapter, library["id"], progress):
+            live = next((lib for lib in adapter.libraries() if lib["id"] == library["id"]), None)
+            if live is None or library_identity(live) != library_identity(library):
+                reason = "Library identity or folders changed. Start a fresh audit."
+                store.block_resume(audit_id, reason)
+                raise SafetyError(reason)
+            progress(store.saved_progress(audit_id), 0, "Re-enumerating current library membership…")
+            members = membership(adapter, library["id"])
+            saved = {}
+            if resume_id is not None:
+                if audit["membership"] is not None and members != json.loads(audit["membership"]):
+                    reason = "Library membership, item identity, or paths changed. Start a fresh audit."
+                    store.block_resume(audit_id, reason)
+                    raise SafetyError(reason)
+                saved = {book.id: book for book in store.books(audit_id)}
+                if any(item_id not in members or book.identity != members[item_id]
+                       for item_id, book in saved.items()):
+                    reason = "Saved item identity/path differs from current membership. Start a fresh audit."
+                    store.block_resume(audit_id, reason)
+                    raise SafetyError(reason)
+                store.resume_audit(audit_id)
+                if audit["membership"] is None:
+                    store.checkpoint(audit_id, members, library_identity(live))
+            else:
+                store.checkpoint(audit_id, members, library_identity(live))
+            progress(len(saved), len(members), "Membership verified; continuing saved progress…")
+            for book in inventory(adapter, library["id"], saved_progress, members=members, saved=saved):
                 store.add_book(audit_id, book)
+            # Detect membership/path changes while expanded requests were in flight as well.
+            if membership(adapter, library["id"]) != members:
+                reason = "Library membership, item identity, or paths changed during audit. Start a fresh audit."
+                store.block_resume(audit_id, reason)
+                raise SafetyError(reason)
+            final_library = next((lib for lib in adapter.libraries() if lib["id"] == library["id"]), None)
+            if final_library is None or library_identity(final_library) != library_identity(live):
+                reason = "Library identity or folders changed during audit. Start a fresh audit."
+                store.block_resume(audit_id, reason)
+                raise SafetyError(reason)
             store.finish_audit(audit_id)
-        except BaseException:
-            store.finish_audit(audit_id, "interrupted", "Audit interrupted or failed. Start a fresh audit; writes disabled.")
+        except BaseException as exc:
+            # Adapter/Safety messages contain controlled diagnostics, never arbitrary response bodies.
+            error = str(exc) if isinstance(exc, (AdapterError, SafetyError)) else (
+                "Audit interrupted or failed validation. Saved progress retained; incomplete audits cannot be approved or applied.")
+            if isinstance(exc, InventoryChanged):
+                store.block_resume(audit_id, error)
+            store.finish_audit(audit_id, "interrupted", error)
             raise
+        finally:
+            if isinstance(adapter, CliAdapter):
+                adapter.diagnostic, adapter.log = previous_diagnostic, previous_log
         return audit_id
 
 

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .audit import analyze
+from .diagnostics import event, local_log
 from .locking import operation_lock
 from .models import Book, compact, validate_target
 
@@ -41,6 +42,38 @@ class Store:
                     created TEXT NOT NULL, updated TEXT NOT NULL, data TEXT NOT NULL,
                     message TEXT NOT NULL DEFAULT '', observed TEXT);
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(audits)")}
+            for name, kind in (("membership", "TEXT"), ("library_identity", "TEXT"), ("expected", "INTEGER"),
+                               ("resume_blocked", "TEXT"), ("slow_requests", "TEXT NOT NULL DEFAULT '[]'")):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE audits ADD COLUMN {name} {kind}")
+        self.log = local_log(Path(self.path).parent / "audit.log")
+
+    def checkpoint(self, audit_id, members, library_identity):
+        with self.connect() as db:
+            db.execute("UPDATE audits SET membership=?, library_identity=?, expected=? WHERE id=?",
+                       (compact(members), compact(library_identity), len(members), audit_id))
+
+    def resume_audit(self, audit_id):
+        # Continue the same snapshot and pending decisions. New audits alone expire old approvals.
+        with self.connect() as db:
+            db.execute("UPDATE audits SET status='running', finished=NULL, error=NULL WHERE id=?", (audit_id,))
+
+    def block_resume(self, audit_id, reason):
+        with self.connect() as db:
+            db.execute("UPDATE audits SET resume_blocked=? WHERE id=?", (reason, audit_id))
+
+    def request_diagnostic(self, audit_id, record):
+        if record["state"] == "requesting" or record["operation"] != "items get":
+            return
+        with self.connect() as db:
+            slow = json.loads(db.execute("SELECT slow_requests FROM audits WHERE id=?", (audit_id,)).fetchone()[0])
+            slow.append(record)
+            slow.sort(key=lambda r: r["duration"], reverse=True)
+            db.execute("UPDATE audits SET slow_requests=? WHERE id=?", (compact(slow[:10]), audit_id))
+
+    def saved_progress(self, audit_id):
+        return self.rows("SELECT COUNT(*) AS count FROM books WHERE audit_id=?", (audit_id,))[0]["count"]
 
     @contextmanager
     def connect(self):
@@ -58,15 +91,16 @@ class Store:
         with self.connect() as db:
             return [dict(r) for r in db.execute(query, args)]
 
-    def start_audit(self, server, library, name, read_only=False) -> int:
+    def start_audit(self, server, library, name, read_only=False, library_identity=None) -> int:
         with self.connect() as db:
             # Any new attempt invalidates prior approvals, including interrupted audits.
             db.execute("UPDATE findings SET status='expired', reviewed=? WHERE status='approved' AND audit_id IN "
                        "(SELECT id FROM audits WHERE server=? AND library=?)", (now(), server, library))
             db.execute("UPDATE audits SET status='interrupted', finished=? WHERE server=? AND library=? "
                        "AND status='running'", (now(), server, library))
-            cursor = db.execute("INSERT INTO audits(server,library,name,status,started,read_only) "
-                                "VALUES(?,?,?,'running',?,?)", (server, library, name, now(), read_only))
+            cursor = db.execute("INSERT INTO audits(server,library,name,status,started,read_only,library_identity) "
+                                "VALUES(?,?,?,'running',?,?,?)", (server, library, name, now(), read_only,
+                                                                compact(library_identity) if library_identity else None))
             return cursor.lastrowid
 
     def add_book(self, audit_id: int, book: Book):
@@ -85,7 +119,14 @@ class Store:
 
     def finish_audit(self, audit_id, status="complete", error=None):
         with self.connect() as db:
+            audit = db.execute("SELECT membership FROM audits WHERE id=?", (audit_id,)).fetchone()
+            if status == "complete" and audit[0] is not None:
+                expected = set(json.loads(audit[0]))
+                saved = {r[0] for r in db.execute("SELECT item_id FROM books WHERE audit_id=?", (audit_id,))}
+                if saved != expected:
+                    raise ValueError("Cannot complete an audit until every expected book is saved.")
             db.execute("UPDATE audits SET status=?, finished=?, error=? WHERE id=?", (status, now(), error, audit_id))
+        event(self.log, audit_id=audit_id, status=status, saved=self.saved_progress(audit_id), error=error)
 
     def audit(self, audit_id):
         return self.rows("SELECT * FROM audits WHERE id=?", (audit_id,))[0]

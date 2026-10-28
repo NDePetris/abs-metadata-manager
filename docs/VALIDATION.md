@@ -2,6 +2,17 @@
 
 Development date: 2026-10-28, Windows x64, Python 3.13.14.
 
+## Audit reliability update — 2026-10-28
+
+- Full suite: **128 passed in 20.44 seconds**. Ruff (`python -m ruff check app.py abs_manager tests`) and `git diff --check` passed.
+- Added interrupted/resumed snapshot coverage, process-restart recovery (including abandoned `running` status), repeated exhausted retries, membership/identity/path and folder changes, legacy schema migration, checkpoint completeness, lock exclusion, and permanent/malformed response failures.
+- Streamlit AppTest covers saved counts, durable latest errors, Resume success, changed-library refusal and explanation, no remote requests on navigation/reruns, and ebook warnings without changing the selection. The native UI mechanical detector reported no findings.
+- Official abs-cli 1.2.0 was checked against a synthetic loopback HTTP 502: it exits 2 and emits `API request failed: 502 Bad Gateway` on stderr. The new protocol regression exhausts three transient reads for the second book, preserves the first book, reopens the Store, resumes without re-fetching the first expanded book, and completes using GETs only.
+- Tests cover credential/response-body exclusion from errors and rotating logs, operation/page context, request timeout configuration, exponential backoff, and single-attempt metadata updates. Existing approval, durable journal, reconciliation, rollback, and unrelated-metadata protection tests remain passing.
+- The sandbox's temporary-directory/loopback restrictions prevented the first test invocation from completing normally. The final full suite ran with normal local permissions; transports used only fake adapters or a loopback simulator and synthetic tokens.
+- Existing production SQLite progress was inspected using a read-only connection: audit #2 has 51 saved Audiobooks records; audit #3 has 56 saved Books records. Neither has the membership checkpoint required to prove unchanged membership. Their history is retained; the UI explains the one-time fresh-audit requirement. Recovery steps are in [README.md](../README.md#interrupted-read-only-audits).
+- No production metadata request or production write was performed. Cloudflare connection routing is unchanged. No snapshot status, approval, production journal, or production metadata was edited during development.
+
 ## Verified locally
 
 - Official abs-cli 1.2.0 Windows x64 binary: `--version`, full help for list/get/update/libraries, tagged transport and config source, and published SHA-256 comparison.

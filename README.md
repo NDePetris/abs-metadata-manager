@@ -50,7 +50,27 @@ Only CLI version 1.2.0 is currently enabled for writes. Its declared tested ABS 
 
 Decisions and history survive app restarts. A new audit resets prior approvals, even if suggestions look identical. A partial or interrupted new audit disables applying the previous snapshot. Historical snapshots remain available for inspection. Already applied decisions are consumed; rollback never silently reapproves them.
 
-If an audit is interrupted with Streamlit's Stop control, its partial snapshot is retained and cannot authorize writes. A process crash may leave it labelled `running`; start another audit to mark the old attempt interrupted. A write interrupted while the CLI is running remains prepared/applied/uncertain and must be reconciled before further writes. Never delete the database to bypass recovery checks.
+If an audit is interrupted with Streamlit's Stop control, its partial snapshot is retained and cannot authorize writes. A process crash may leave it labelled `running`; **Resume audit** also handles that state once the process lock is released. A write interrupted while the CLI is running remains prepared/applied/uncertain and must be reconciled before further writes. Never delete the database to bypass recovery checks.
+
+## Interrupted read-only audits
+
+The Cloudflare tunnel remains the connection route; direct LAN access is not required. Library listing and expanded item reads retry only timeouts, connection resets, and identifiable HTTP 429/502/503/504 failures, up to **three total attempts**, with **1- and 2-second backoffs**. Authorization failures, other permanent errors, malformed JSON, and invalid schemas stop immediately. Metadata updates and rollback writes never receive automatic retries.
+
+The request timeout defaults to **90 seconds per attempt**. Change **Settings → CLI timeout (seconds)** and reconnect to apply a different timeout, or set `ABS_MM_TIMEOUT=120` in your local environment before launch. Existing `.env` overrides (including an earlier value of 45) take precedence over the new default. Requests remain sequential and paced.
+
+To resume an audit created by this version:
+
+1. Restart with `.\start.ps1` if necessary, keeping the same SQLite database (`ABS_MM_DB`).
+2. In **Settings**, connect using the same Cloudflare server URL and select the same library. The app never switches libraries automatically. A library name suggesting ebooks, or a snapshot containing mostly ebooks, displays a warning; ebooks remain read-only.
+3. In **Library → Audit snapshot**, select the latest interrupted (or abandoned `running`) audit for that library. Check **Saved progress** and **Latest audit error**.
+4. Choose **Resume audit**. The app re-enumerates all library pages, compares the complete ID/identity/path manifest and library folders with the saved checkpoint, and validates every saved book before reuse. Validated saved books skip expanded `items get` calls. The same snapshot and pending findings continue without duplicating books or expiring decisions again. A new **Audit whole library** instead creates a separate snapshot and expires prior approvals.
+5. If another request exhausts retries, repeat Resume later. Progress and request timings survive app restarts. Changed membership, identity, or paths refuse resumption and require a new audit; the reason stays visible. Only the latest complete snapshot can authorize approvals or writes, after every expected book is saved and a final membership check succeeds.
+
+**The two audits interrupted before this update (Audiobooks ~51/110 and Books ~56/656) have no original membership checkpoint.** Their saved records and findings are preserved, but unchanged membership cannot be proven retrospectively. Resume is disabled with that explanation. For each, select its original library in Settings and choose **Audit whole library** once to establish a checkpoint. If that new audit is interrupted, resume it using the steps above. Do not delete old snapshots, edit database statuses, copy approvals, or infer a new target from `oldLibraryItemId` to bypass this check. If listing fails before any books are saved, Resume safely retries establishing the initial checkpoint.
+
+During audits, a native status message shows the operation, current item/page, attempt, duration, exit code, and diagnostic category. **Audit diagnostics · slowest item requests** retains the ten slowest expanded request attempts, including failures, for each snapshot. A timeout in a GET is reported as read-only and does not claim that an update may have been submitted.
+
+Rotating diagnostics live at `data/audit.log` by default (1 MB each, current file plus three backups). With `ABS_MM_DB`, the log is beside that database. Progress, failures, and per-attempt CLI timings are recorded without response bodies, command environments, API keys, URLs, or headers. Stderr is reduced to recognized HTTP status and connection-error vocabulary; arbitrary stderr is withheld rather than risking secret disclosure. These logs, like the database, are local and ignored by Git.
 
 ## Recovery and rollback
 

@@ -191,3 +191,58 @@ def test_official_cli_against_local_http_simulator(tmp_path):
         server.shutdown()
         server.server_close()
         thread.join(3)
+
+
+def test_official_cli_transient_reads_resume_without_patch(tmp_path, monkeypatch):
+    executable = detect_cli()
+    if not Path(executable).is_file():
+        pytest.skip("Install official abs-cli 1.2.0 for the local retry/resume protocol test")
+    if cli_config().get("refreshToken"):
+        pytest.skip("Do not use personal refresh-token config in protocol tests")
+
+    class InterruptedABS(LocalABS):
+        def do_GET(self):
+            self.server.requests.append(("GET", self.path))
+            if self.path == "/api/libraries":
+                self.reply({"libraries": [{"id": "library-a", "name": "Audiobooks", "mediaType": "book"}]})
+            elif self.path.startswith("/api/libraries/library-a/items"):
+                self.reply({"results": self.server.books, "total": 2, "limit": 50, "page": 0})
+            elif self.path == "/api/items/current-id?expanded=1":
+                self.reply(self.server.books[0])
+            elif self.path == "/api/items/second?expanded=1":
+                if self.server.failures:
+                    self.server.failures -= 1
+                    self.reply({"error": "Bad Gateway; never-log-this-response-secret"}, 502)
+                else:
+                    self.reply(self.server.books[1])
+            else:
+                self.reply({}, 404)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), InterruptedABS)
+    server.books = [make_book(), make_book(item_id="second")]
+    server.requests, server.failures = [], 3
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        adapter = CliAdapter(Settings(f"http://127.0.0.1:{server.server_port}", "local-test-token", executable, 0.1, 10))
+        monkeypatch.setattr(adapter, "_pace", lambda: None)
+        monkeypatch.setattr("abs_manager.adapter.time.sleep", lambda delay: None)
+        store = Store(tmp_path / "retry.sqlite3")
+        library = adapter.libraries()[0]
+        with pytest.raises(AdapterError, match="transient_http.*retries=2.*exit_code=2"):
+            run_audit(store, adapter, library)
+        assert store.saved_progress(1) == 1
+        assert store.audit(1)["status"] == "interrupted"
+        run_audit(Store(store.path), adapter, library, resume_id=1)
+        assert store.audit(1)["status"] == "complete"
+        assert store.saved_progress(1) == 2
+        assert server.requests.count(("GET", "/api/items/current-id?expanded=1")) == 1
+        assert server.requests.count(("GET", "/api/items/second?expanded=1")) == 4
+        assert all(request[0] == "GET" for request in server.requests)
+        diagnostics = store.audit(1)["slow_requests"] + (tmp_path / "audit.log").read_text(encoding="utf-8")
+        assert "never-log-this-response-secret" not in diagnostics
+        assert "local-test-token" not in diagnostics
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(3)
