@@ -120,9 +120,18 @@ def propose_discrepancy(store, audit_id, item_id, field, candidate_id):
     if field not in item["values"]:
         raise ValueError("Candidate has no evidence for this field.")
     target = item["values"][field]
-    if comparable(field, target) == comparable(field, store.book(audit_id, item_id).values[field]):
+    before = store.book(audit_id, item_id).values[field]
+    equal = comparable(field, target) == comparable(field, before)
+    if field == "series":
+        equal = equal and comparable("series_position", [s["sequence"] for s in target]) == comparable(
+            "series_position", [s["sequence"] for s in before])
+    if equal:
         raise ValueError("Candidate agrees; no discrepancy to propose.")
     reason = compact({"source": item["source"], "url": item["url"], "candidate_id": candidate_id,
                       "signals": matched["signals"], "contradictions": matched["contradictions"],
-                      "human_selection": report["selected_candidate"], "evidence": item["raw"]})
+                      "human_selection": report["selected_candidate"], "evidence": item["raw"],
+                      "lookups": [{k: lookup[k] for k in ("source", "scope", "query", "captured")}
+                                  for attempt in report["lookups"]
+                                  for lookup in [attempt.get("previous_success", attempt)] if any(
+                                      c["id"] == candidate_id for c in lookup.get("candidates", []))]})
     return store.propose(audit_id, item_id, field, target, reason)

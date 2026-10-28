@@ -78,6 +78,9 @@ def analyze(book: Book) -> tuple[dict, list[Finding]]:
     title = current["title"] or ""
     series = current["series"]
     folder = folder_evidence(book.raw.get("relPath") or book.raw["path"])
+    if not book.is_audio:
+        folder.update(title=re.sub(r"\s*\(\d+\)$", "", folder["title"]), sequence=None,
+                      series=None, author=None, narrator_credit=None)
     embedded = embedded_evidence(book)
     evidence = {"folder": folder, "embedded": embedded}
     normalized = {**current, "series": [{**s, "sequence": sequence(s["sequence"])} for s in series]}

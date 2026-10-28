@@ -63,7 +63,7 @@ def verification_view(store, choose_snapshot):
                 bool(b["fields"]["embedded"]["value"]) for b in report),
              "Limit": "Only tags exposed by ABS. Composer is not assumed narrator."},
             {"Evidence": "External bibliographic / recording", "Books with captured evidence": sum(
-                any(l["state"] == "ok" for l in b["lookups"]) for b in report),
+                any(l.get("previous_success", l)["state"] == "ok" for l in b["lookups"]) for b in report),
              "Limit": "Work matches cannot corroborate recording narrators or saved cover images."},
             {"Evidence": "Cover presence", "Books with captured evidence": sum(
                 bool(b["fields"]["cover"]["value"]) for b in report), "Limit": "Correctness requires visual edition review."},
@@ -161,6 +161,7 @@ def verification_view(store, choose_snapshot):
         st.info(item["calibre_limitation"])
     st.dataframe([{"Field": key, "Saved value": json.dumps(f["value"], ensure_ascii=False),
                    "Status": f["status"], "Assessment": f["reason"],
+                   "Human outcome": f["human_review"].get("outcome", "Reviewed") if f["human_review"] else "",
                    "Human reviewed": f["human_review"]["date"] if f["human_review"] else ""}
                   for key, f in item["fields"].items()], hide_index=True, width="stretch")
     left, right = st.columns(2)
@@ -171,6 +172,9 @@ def verification_view(store, choose_snapshot):
         st.write("**Captured embedded tags and folder evidence**")
         st.json({"embedded": item["fields"]["embedded"]["value"], "folder": item["folder"]})
     with st.expander("All field provenance and lookup outcomes"):
+        if item["lookups"]:
+            st.dataframe([{k: lookup[k] for k in ("source", "captured", "state")}
+                          for lookup in item["lookups"]], hide_index=True, width="stretch")
         st.json(item)
     if connected and item["fields"]["cover"]["value"]:
         with st.form(f"verification_cover_{aid}_{item_id}"):
@@ -209,10 +213,11 @@ def verification_view(store, choose_snapshot):
             st.success("Pending proposal created. Approve it in Review, then confirm the exact preview in Apply.")
     with st.form(f"human_review_{aid}_{item_id}"):
         field = st.selectbox("Manually reviewed field", QUALITY_FIELDS)
+        outcome = st.selectbox("Human review outcome", ["Reviewed", "Confirmed error", "Formatting preference", "Unresolved"])
         evidence = st.text_area("Human review evidence / source reference")
         reviewed = st.form_submit_button("Record manual review")
     if reviewed:
-        store.annotate_verification(aid, item_id, field, evidence)
+        store.annotate_verification(aid, item_id, field, evidence, outcome=outcome)
         st.rerun()
     st.caption("Translator, cover, chapter, identifier, and embedded-tag corrections remain read-only. "
                "Use Audiobookshelf or your source catalog deliberately for external remediation. "

@@ -264,23 +264,31 @@ class Store:
         latest = {}
         for row in rows:
             data = json.loads(row["data"])
-            latest.setdefault((data["source"], data["scope"]), data)
+            key = (data["source"], data["scope"])
+            if key not in latest:
+                latest[key] = data
+            elif latest[key]["state"] == "unavailable" and data["state"] in ("ok", "no_match") and data[
+                    "query"] == latest[key]["query"]:
+                latest[key].setdefault("previous_success", data)
         return list(latest.values())
 
     def verification_annotations(self, audit_id, item_id):
         return {r["field"]: json.loads(r["data"]) for r in self.rows(
             "SELECT field,data FROM verification_annotations WHERE audit_id=? AND item_id=?", (audit_id, item_id))}
 
-    def annotate_verification(self, audit_id, item_id, field, evidence, *, candidate_id=None):
+    def annotate_verification(self, audit_id, item_id, field, evidence, *, candidate_id=None, outcome="Reviewed"):
         from .verification import QUALITY_FIELDS
         if field not in (*QUALITY_FIELDS, "edition") or not evidence.strip():
             raise ValueError("Select a field and provide review evidence.")
+        if outcome not in ("Reviewed", "Confirmed error", "Formatting preference", "Unresolved"):
+            raise ValueError("Choose a valid human review outcome.")
         with operation_lock(self.path):
             book = self.book(audit_id, item_id)
-            data = {"date": now(), "evidence": evidence, "kind": "human review", "value_digest": digest(book.raw)}
+            data = {"date": now(), "evidence": evidence, "kind": "human review", "outcome": outcome,
+                    "value_digest": digest(book.raw)}
             if field == "edition":
                 candidates = [c for lookup in self.verification_evidence(audit_id, item_id)
-                              for c in lookup.get("candidates", [])]
+                              for c in lookup.get("previous_success", lookup).get("candidates", [])]
                 if candidate_id not in {c["id"] for c in candidates}:
                     raise ValueError("Select a captured candidate.")
                 data["candidate_id"] = candidate_id

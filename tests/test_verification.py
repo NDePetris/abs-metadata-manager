@@ -166,6 +166,9 @@ def test_exact_asin_can_surface_wrong_recording_credit_without_verifying_it():
     assert r["matches"][0]["level"] == "recording"
     assert r["fields"]["narrators"]["status"] == "Conflict"
     assert isbn_key("9780306406158") == ""
+    raw["media"]["metadata"]["isbn"] = "9780306406158"
+    c = external(isbn="9780306406158")
+    assert assess(Book(raw), evidence(c))["fields"]["identifiers"]["status"] == "Conflict"
 
 
 def test_editions_ambiguous_and_human_selection_distinct():
@@ -234,6 +237,8 @@ def test_cache_resume_cancel_offline_and_failure_retry(setup):
     run_verification(store, rid, source)
     assert store.verification_runs(aid)[0]["done"] == 1
     assert store.verification_evidence(aid, "current-id")[0]["state"] == "unavailable"
+    assert store.verification_evidence(aid, "current-id")[0]["previous_success"]["state"] == "ok"
+    assert any(b["matches"] for b in Store(store.path).verification_report(aid))
     source.fail = False
     retry_unavailable(store, rid)
     run_verification(store, rid, source)
@@ -296,6 +301,8 @@ def test_public_and_abs_schemas_and_units():
     result = source.search(source.query(book()))
     assert result["candidates"][0]["duration"] == 1200
     assert result["candidates"][0]["raw"]["duration"] == 20
+    custom = AbsSource(api, "custom-audible-catalog")
+    assert custom.search(custom.query(book()))["candidates"][0]["work_only"]
 
 
 def test_cli_providers_search_argv_and_schema(monkeypatch):
@@ -396,3 +403,48 @@ def test_csv_formula_injection():
     raw = copy.deepcopy(book().raw)
     raw["media"]["metadata"]["title"] = "=HYPERLINK()"
     assert "'=HYPERLINK()" in export_csv([assess(Book(raw))])
+
+
+def test_fractional_series_discrepancy_can_be_pending(setup):
+    store, api, aid = setup
+    source = FakeSource()
+    b = store.book(aid, "current-id")
+    c = candidate({"title": b.values["title"], "authors": b.values["authors"],
+                   "narrators": b.values["narrators"], "duration": 1000,
+                   "series": [{"name": "Bobiverse", "sequence": "4.5"}]}, "test")
+    source.search = lambda query: {"raw": [], "candidates": [c]}
+    rid = start_verification(store, aid, source, ["current-id"])
+    run_verification(store, rid, source)
+    # Remove the pre-existing title proposal only; series currently has no proposal.
+    fid = propose_discrepancy(store, aid, "current-id", "series", c["id"])
+    assert next(f for f in store.findings(aid) if f["id"] == fid)["target"][0]["sequence"] == "4.5"
+    assert not api.writes
+
+
+def test_review_outcome_does_not_become_external_verification(setup):
+    store, _, aid = setup
+    store.annotate_verification(aid, "current-id", "cover", "Wrong edition jacket; compared source reference",
+                                outcome="Confirmed error")
+    f = store.verification_report(aid)[0]["fields"]["cover"]
+    assert f["status"] == "Unverified"
+    assert f["human_review"]["outcome"] == "Confirmed error"
+
+
+@pytest.mark.parametrize("data", [{"title": {}}, {"title": "Example", "url": []}, {"title": "Example", "subtitle": 42}])
+def test_malformed_candidate_fails_closed(data):
+    with pytest.raises(ValueError):
+        candidate(data, "test")
+
+
+def test_ebook_numeric_title_folder_is_not_a_series_position():
+    raw = make_book(title="1984", path="George Orwell/1984 (653)", series="Classics", seq="1", narrators=[])
+    raw["media"].update(audioFiles=[], duration=0)
+    assert not any(f.field in ("title", "narrators", "series") for f in analyze(Book(raw))[1])
+
+
+def test_duplicate_appended_subtitle_and_explicit_missing_series():
+    raw = make_book(title="Example: Real subtitle", series=None)
+    raw["media"]["metadata"]["subtitle"] = "Real subtitle"
+    assert assess(Book(raw))["fields"]["subtitle"]["status"] == "Conflict"
+    raw["media"]["metadata"].update(title="Example: Explicit Series, Book 2.5", subtitle="")
+    assert assess(Book(raw))["fields"]["series"]["status"] == "Missing"

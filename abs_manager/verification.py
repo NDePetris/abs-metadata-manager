@@ -29,8 +29,9 @@ def names(value) -> list[str]:
         # Commas may be part of contributor names. Never split them heuristically.
         return [value] if value.strip() else []
     if isinstance(value, list):
-        return [x if isinstance(x, str) else x["name"] for x in value
-                if isinstance(x, str) or isinstance(x, dict) and isinstance(x.get("name"), str)]
+        result = [x if isinstance(x, str) else x["name"] for x in value
+                  if isinstance(x, str) or isinstance(x, dict) and isinstance(x.get("name"), str)]
+        return [name for name in result if name.strip()]
     return []
 
 
@@ -71,6 +72,9 @@ def comparable(field, value):
 
 def candidate(raw: dict, source: str, url: str = "", *, work_only=False) -> dict:
     """Normalize ABS/provider fields without discarding the provider's original record."""
+    for key in ("title", "subtitle", "language", "isbn", "asin", "url"):
+        if raw.get(key) is not None and not isinstance(raw[key], str):
+            raise ValueError("Invalid candidate text field.")
     series = raw.get("series", [])
     if isinstance(series, str):
         series = [{"name": series, "sequence": sequence(raw.get("seriesNumber"))}] if series else []
@@ -108,7 +112,8 @@ def match(book: Book, item: dict) -> dict:
     for key in ("asin", "isbn"):
         a, b = saved["identifiers"].get(key), other.get("identifiers", {}).get(key)
         if a and b:
-            equal = bool(isbn_key(a)) and isbn_key(a) == isbn_key(b) if key == "isbn" else str(a).upper() == str(b).upper()
+            equal = (bool(isbn_key(a)) and isbn_key(a) == isbn_key(b) if key == "isbn" else
+                     bool(re.fullmatch(r"[A-Z0-9]{10}", str(a).upper())) and str(a).upper() == str(b).upper())
             (signals if equal else contradictions).append(key)
             if equal:
                 exact_ids.append(key)
@@ -180,7 +185,9 @@ def assess(book: Book, evidence: list[dict] = (), *, selected: str | None = None
     if not book.is_audio:
         folder["title"] = re.sub(r"\s*\(\d+\)$", "", folder["title"])
         folder["limitation"] = "Calibre names may be truncated/sanitized; folders cannot prove a conflict."
-    candidates = [c for lookup in evidence if lookup.get("state") == "ok" for c in lookup.get("candidates", [])]
+    usable = [lookup.get("previous_success", lookup) if lookup.get("state") == "unavailable" else lookup
+              for lookup in evidence]
+    candidates = [c for lookup in usable if lookup.get("state") == "ok" for c in lookup.get("candidates", [])]
     matches = [{**match(book, c), "candidate": c} for c in candidates]
     plausible = [m for m in matches if m["level"] != "unmatched"]
     chosen = next((m for m in plausible if m["candidate_id"] == selected), None)
@@ -216,6 +223,8 @@ def assess(book: Book, evidence: list[dict] = (), *, selected: str | None = None
             status, reason = "Missing", "Required credit/value is absent; identify the correct edition."
         elif field == "series_position" and any(v is None for v in value):
             status, reason = "Missing", "Assigned series lacks a valid position; omnibus/unnumbered editions need review."
+        elif field == "identifiers" and value.get("isbn") and not isbn_key(value["isbn"]):
+            status, reason = "Conflict", "Saved ISBN has an invalid length/checksum; confirm the identifier externally."
         elif field == "title" and book.is_audio and value and canon(folder["title"]) == canon(value):
             status, reason = "Consistent", "Saved title agrees with folder evidence; no independent external verification."
             provenance.append({"source": "Folder", "value": folder["title"]})
@@ -223,16 +232,23 @@ def assess(book: Book, evidence: list[dict] = (), *, selected: str | None = None
         # Formatting suggestions and weak folder mismatches are not confirmed factual errors.
         if field not in ("chapters", "cover", "embedded") and any(f["kind"] == "conflict" for f in relevant):
             status, reason = "Conflict", "Local evidence differs; inspect provenance before deciding which value is correct."
+        if field == "series" and not value and any(f["kind"] == "missing" for f in relevant):
+            status, reason = "Missing", "Explicit series evidence is present in the title; confirm the correct assignment."
         if field == "subtitle" and value and (canon(value) == canon(saved["title"] or "") or re.search(
-                r"\bBook\s+\d+(?:\.\d+)?\s*$", value, re.IGNORECASE)):
+                r"\bBook\s+\d+(?:\.\d+)?\s*$", value, re.IGNORECASE) or
+                any(canon(saved["title"] or "").endswith(sep + canon(value)) for sep in (": ", " - "))):
             status, reason = "Conflict", "Possible duplicated title or promotional series subtitle; inspect edition."
         if external and field in external["candidate"]["values"] and status != "Not applicable":
             other = external["candidate"]["values"][field]
             # Missing optional source fields do not assert absence.
-            if other or field == "subtitle" and other == "":
+            valid = field != "identifiers" or not other.get("isbn") or bool(isbn_key(other["isbn"]))
+            if valid and (other or field == "subtitle" and other == ""):
                 provenance.append({"source": external["candidate"]["source"], "url": external["candidate"]["url"],
                                    "candidate_id": external["candidate_id"], "value": other,
-                                   "match": external["level"], "human_selected": chosen is not None})
+                                   "match": external["level"], "human_selected": chosen is not None,
+                                   "lookups": [{k: lookup[k] for k in ("query", "captured") if k in lookup}
+                                               for lookup in usable if any(c["id"] == external["candidate_id"]
+                                                                           for c in lookup.get("candidates", []))]})
                 equal = comparable(field, value) == comparable(field, other)
                 recording_field = field in ("narrators", "series_position") and book.is_audio
                 if not recording_field or external["level"] == "recording":
@@ -253,6 +269,7 @@ def assess(book: Book, evidence: list[dict] = (), *, selected: str | None = None
     return {"item_id": book.id, "identity": book.identity, "type": "audiobook" if book.is_audio else "ebook",
             "fields": fields, "folder": folder, "lookups": list(evidence), "matches": matches,
             "ambiguous": len(plausible) > 1, "selected_candidate": selected,
+            "edition_review": (reviews or {}).get("edition"),
             "calibre_limitation": None if book.is_audio or calibre else
             "Calibre catalog unavailable/unmatched: limited to Audiobookshelf and filesystem evidence."}
 
@@ -260,13 +277,17 @@ def assess(book: Book, evidence: list[dict] = (), *, selected: str | None = None
 def export_csv(report: list[dict]) -> str:
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(buffer, fieldnames=["item_id", "type", "title", "field", "status", "value",
-                                                "reason", "provenance", "human_review", "lookups", "matches"])
+                                                "reason", "provenance", "local_findings", "human_review",
+                                                "identity", "folder", "lookups", "matches", "ambiguous",
+                                                "selected_candidate", "edition_review", "calibre_limitation"])
     writer.writeheader()
     for book in report:
         for field, assessment in book["fields"].items():
             row = {"item_id": book["item_id"], "type": book["type"], "title": book["fields"]["title"]["value"],
-                   "field": field, **{k: assessment[k] for k in ("status", "value", "reason", "provenance", "human_review")},
-                   "lookups": book["lookups"], "matches": book["matches"]}
+                   "field": field, **{k: assessment[k] for k in ("status", "value", "reason", "provenance",
+                                                                "local_findings", "human_review")},
+                   **{k: book[k] for k in ("identity", "folder", "lookups", "matches", "ambiguous",
+                                          "selected_candidate", "edition_review", "calibre_limitation")}}
             row = {k: v if isinstance(v, str) else compact(v) for k, v in row.items()}
             writer.writerow({k: "'" + v if v.lstrip().startswith(("=", "+", "-", "@")) else v for k, v in row.items()})
     return buffer.getvalue()

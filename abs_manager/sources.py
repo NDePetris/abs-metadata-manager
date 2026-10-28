@@ -7,6 +7,9 @@ from urllib.parse import urlencode
 from .models import Book, digest
 from .verification import candidate
 
+RECORDING_PROVIDERS = frozenset(("audnexus", "audible", *("audible." + region for region in
+    ("ca", "uk", "au", "fr", "de", "jp", "it", "in", "es"))))
+
 
 class Source(Protocol):
     id: str
@@ -26,7 +29,7 @@ class AbsSource:
         self.scope = adapter.server
 
     def query(self, book):
-        recording = any(p in self.provider.lower() for p in ("audible", "audnexus"))
+        recording = self.provider in RECORDING_PROVIDERS
         return {"title": book.metadata.get("asin") if recording and book.metadata.get("asin") else
                 book.values["title"], "author": ", ".join(book.values["authors"])}
 
@@ -40,8 +43,7 @@ class AbsSource:
                 normalized["duration"] = raw["duration"] * 60
             url = raw.get("url") or raw.get("link") or self.scope + "/api/search/books?" + urlencode(
                 {"provider": self.provider, **query})
-            item = candidate(normalized, self.id, url,
-                             work_only=not any(p in self.provider.lower() for p in ("audible", "audnexus")))
+            item = candidate(normalized, self.id, url, work_only=self.provider not in RECORDING_PROVIDERS)
             item["raw"] = raw
             item["id"] = digest({k: v for k, v in item.items() if k != "id"})
             candidates.append(item)

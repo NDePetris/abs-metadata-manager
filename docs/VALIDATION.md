@@ -2,6 +2,16 @@
 
 Development date: 2026-10-28, Windows x64, Python 3.13.14.
 
+## Independent verification — 2026-10-28
+
+- Branch relationships were checked before editing: initial HEAD was `7e84ca2`, an ancestor of local `main`. Implementation is isolated on `codex/metadata-verification`; resumable audits and write-safety behavior remain covered.
+- Final full suite: **176 passed in 28.02 seconds**, with no skips in this workspace. Ruff, `git diff --check`, `pip check`, and `start.ps1 -Check` passed. The sandbox's temporary-directory restrictions required running pytest with normal local permissions; tests used only synthetic tokens and fake/loopback transports.
+- Installed abs-cli 1.2.0 full help and tagged CLI/ABS source were inspected. A real CLI subprocess discovered providers and searched candidates against a loopback server using GET only. Tests verify query/source/date provenance, candidate-array parsing, duration conversion, cache reuse, interruption/resumption, cancellation, failed-refresh evidence retention, rate limits, timeouts, and offline reports.
+- Regressions cover all books (including a book with zero findings), audiobook/ebook requirements, Calibre numeric folders/titles, ISBN checksums and ISBN-10 equivalence, ASIN/ISBN matching, ambiguity, distinct recording credits, multi-author/narrator/translator arrays, decimals, duplicate/promotional versus legitimate subtitles, generic/missing/invalid chapter timing, covers, embedded-tag staleness, manual outcomes, and pending corrections.
+- Streamlit AppTest covers empty/sample reports, complete matrices, filters, explicit discovery/preparation/start, cancellation, human review/edition selection, ebook correction refusal, and no remote writes/refetches on rendering/reruns. An isolated running preview was inspected in the actual app browser panel with six synthetic records. Native controls/tables preserve the desktop design. The Impeccable detector returned no findings; its pre-existing design-sidecar drift warning was left unchanged.
+- The ignored historical export yielded **110 books × 11 fields = 1,210 assessments**, 110 with embedded evidence, 110 with cover paths, and 106 with chapter arrays. Without external lookups it correctly reported zero externally verified fields. Only aggregate counts were retained in documentation.
+- Live provider availability, current production coverage, and the 656-ebook collection were not tested: no configured production credentials or Calibre catalog were available. No production metadata write, scan, Quick Match, cover/chapter mutation, or Calibre mutation occurred. See [Verification guide](VERIFICATION.md) for source limitations and exact startup/validation instructions.
+
 ## Audit reliability update — 2026-10-28
 
 - Full suite: **128 passed in 20.44 seconds**. Ruff (`python -m ruff check app.py abs_manager tests`) and `git diff --check` passed.

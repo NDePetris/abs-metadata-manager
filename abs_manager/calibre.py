@@ -17,6 +17,10 @@ def import_catalog(store, audit_id, text):
         raise ValueError("Expected calibredb list --for-machine JSON records with numeric id and title.")
     if len({r["id"] for r in catalog}) != len(catalog):
         raise ValueError("Duplicate Calibre IDs; use a single library export.")
+    if any(not isinstance(row.get("identifiers", {}), dict) or
+           not isinstance(row.get("authors", []), (str, list)) or
+           row.get("series") is not None and not isinstance(row["series"], str) for row in catalog):
+        raise ValueError("Invalid Calibre contributor, series, or identifier schema.")
     result = {}
     captured, fingerprint = now(), digest(catalog)
     with operation_lock(store.path):
@@ -42,7 +46,9 @@ def import_catalog(store, audit_id, text):
             if len(matches) != 1:
                 continue
             row, authors = matches[0]
-            v = {"title": row["title"], "authors": authors}
+            v = {"title": row["title"]}
+            if "authors" in row:
+                v["authors"] = authors
             if "series" in row:
                 v["series"] = [{"name": row["series"], "sequence": sequence(row.get("series_index"))}] if row["series"] else []
                 v["series_position"] = [s["sequence"] for s in v["series"]]
