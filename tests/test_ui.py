@@ -49,7 +49,7 @@ def test_settings_success_survives_reruns_navigation_and_disconnect(tmp_path, mo
     assert any("2.37.1" in m.value and "1.2.0" in m.value for m in at.markdown)
     assert any("Test compatibility warning" in w.value for w in at.warning)
     widget(at, "selectbox", "Book library").set_value("audio-b").run()
-    for page in ("Library", "Review", "Apply", "History", "Settings"):
+    for page in ("Import", "Resolve", "Update Sources", "Reconcile & History", "Settings"):
         navigate(at, page)
         at.run()
         assert not at.exception
@@ -86,7 +86,7 @@ def test_settings_failed_reconnection_clears_stale_status_and_can_recover(tmp_pa
     assert any("Simulated connection failure" in e.value for e in at.error)
     assert not at.success
     assert any("disconnected" in c.value for c in at.caption)
-    for page in ("Library", "Apply", "History", "Settings"):
+    for page in ("Import", "Update Sources", "Reconcile & History", "Settings"):
         navigate(at, page)
         at.run()
         assert not at.exception
@@ -111,7 +111,7 @@ def test_snapshot_selection_survives_widget_cleanup(tmp_path, monkeypatch):
     at.run()
     widget(at, "selectbox", "Audit snapshot").set_value(2).run()
     widget(at, "selectbox", "Audit snapshot").set_value(1).run()
-    for page in ("Settings", "History", "Library", "Review", "Apply"):
+    for page in ("Settings", "Reconcile & History", "Import", "Resolve", "Update Sources"):
         navigate(at, page)
     assert widget(at, "selectbox", "Audit snapshot").value == 1
     assert at.session_state["snapshot_choice"] == 1
@@ -123,12 +123,12 @@ def test_empty_startup_and_all_reruns_are_readonly(tmp_path, monkeypatch):
         AssertionError("UI rendering must never call the CLI")))
     at = AppTest.from_file(str(APP), default_timeout=30).run()
     assert not at.exception
-    for view in ("Review", "Apply", "History", "Settings", "Library"):
+    for view in ("Resolve", "Update Sources", "Reconcile & History", "Settings", "Import"):
         navigate(at, view)
     widget(at, "button", "Load read-only sample library").click().run()
     assert not at.exception
     assert len(Store(tmp_path / "empty.sqlite3").books(1)) == 6
-    for view in ("Review", "Apply", "History", "Library"):
+    for view in ("Resolve", "Update Sources", "Reconcile & History", "Import"):
         navigate(at, view)
 
 
@@ -143,15 +143,15 @@ def test_ui_approve_preview_confirm_verify_and_guarded_rollback(tmp_path, monkey
     at.session_state["library"] = api.libraries()[0]
     at.session_state["snapshot_choice"] = aid
     at.run()
-    navigate(at, "Apply")
+    navigate(at, "Update Sources")
     assert not api.writes
-    navigate(at, "Review")
+    navigate(at, "Resolve")
     fid = next(f["id"] for f in store.findings(aid) if f["actionable"])
     widget(at, "multiselect", "Explicitly select proposals for a bulk decision").set_value([fid]).run()
     widget(at, "button", "Approve selected fields").click().run()
     assert not at.exception
     assert store.findings(aid)[0]["status"] == "approved"
-    navigate(at, "Apply")
+    navigate(at, "Update Sources")
     phrase = next(c.value for c in at.code if c.value.startswith("APPLY "))
     # Even with a valid phrase, omitting the deliberate checkbox cannot write.
     widget(at, "text_input", "Apply confirmation").set_value(phrase)
@@ -162,7 +162,7 @@ def test_ui_approve_preview_confirm_verify_and_guarded_rollback(tmp_path, monkey
     assert not at.exception
     assert len(api.writes) == 1
     assert store.history()[0]["state"] == "verified"
-    for view in ("Library", "Review", "Apply", "History"):
+    for view in ("Import", "Resolve", "Update Sources", "Reconcile & History"):
         navigate(at, view)
         at.run()
         assert len(api.writes) == 1
@@ -183,7 +183,7 @@ def test_editing_an_approved_field_defaults_back_to_pending(setup, monkeypatch):
     fid = next(f["id"] for f in store.findings(aid) if f["actionable"])
     store.review([fid], "approved")
     at = AppTest.from_file(str(APP), default_timeout=30).run()
-    navigate(at, "Review")
+    navigate(at, "Resolve")
     assert widget(at, "selectbox", "Decision").value == "pending"
     widget(at, "text_area", "Edit proposed value").set_value("A separately reviewed title")
     widget(at, "button", "Save field decision").click().run()
@@ -221,7 +221,7 @@ def test_library_resume_button_and_persistent_failure_diagnostics(tmp_path, monk
     assert any("Saved progress: 1 / 2" in c.value for c in at.caption)
     assert any("items get item_id=b" in e.value for e in at.error)
     assert not widget(at, "button", "Resume audit").disabled
-    for page in ("Review", "Apply", "Library"):
+    for page in ("Resolve", "Update Sources", "Import"):
         navigate(at, page)
     assert not api.reads  # Rendering and navigation cannot revalidate remotely.
     widget(at, "button", "Resume audit").click().run()
