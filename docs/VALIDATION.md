@@ -2,6 +2,15 @@
 
 Development date: 2026-10-28, Windows x64, Python 3.13.14.
 
+## Complete workflow — 2026-10-30
+
+- Feature branch `codex/complete-metadata-workflow` starts from current `main` (`5c79512`), including the latest verification implementation. Existing transport and guarded apply/rollback logic are preserved.
+- Full suite: **196 passed**, with no skips in this workspace. Ruff, dependency consistency (`pip check`), `git diff --check`, and `start.ps1 -Check` pass. Streamlit and the official CLI simulator require normal local temporary-directory/socket access; tests use fake adapters, synthetic credentials, or loopback HTTP only.
+- New regressions cover recording contradictions and valid identifiers, query refinements and cache reuse, rejection persistence, manually associated editions, accepted fields across imports, field-only and edition invalidation, external disagreement without revocation, removed/replaced identities, unchanged reimports, source corrections, separate Calibre and ABS observations, and decisions that cannot approve a write.
+- Migration tests use synthetic legacy database copies. Snapshots, finding decisions, annotations, provider evidence, existing Calibre comparison data, and journal records survive additive/idempotent upgrades. Injected interruption rolls back import completion and decision reopening together. Production SQLite was never opened for migration or validation.
+- Three end-to-end Streamlit tests exercise acceptance/reimport/reopening, rejected and absent editions, and manual Calibre corrections. Existing UI tests still exercise exact-confirmed fake writes, uncertain-state recovery, and guarded rollback. Desktop Import and Resolve screens were inspected with a separate six-book synthetic database. The native UI detector reported no findings.
+- No production Audiobookshelf or Calibre changes, media/file mutations, or live external provider searches occurred. Provider catalog coverage remains dependent on the configured server. Direct AudioSilo integration and unsupported Calibre columns remain the documented limitations in [VERIFICATION.md](VERIFICATION.md); manual evidence and correction queues cover unavailable catalog data.
+
 ## Independent verification — 2026-10-28
 
 - Initial HEAD was `7e84ca2`. A refreshed comparison against `origin/main` confirms that this branch also includes that resumable-audit reliability commit, which has not yet reached `main`. Implementation is isolated on `codex/metadata-verification`; resumable audits and write-safety behavior remain covered.
