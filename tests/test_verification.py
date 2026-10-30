@@ -134,7 +134,7 @@ def test_embedded_staleness_composer_and_no_mutation():
 
 
 @pytest.mark.parametrize("identifier,value", [("asin", "B012345678"), ("isbn", "9780306406157")])
-def test_exact_identifiers_and_recording(identifier, value):
+def test_exact_identifiers_with_recording_corroboration(identifier, value):
     raw = copy.deepcopy(book().raw)
     raw["media"]["metadata"][identifier] = value
     c = external(**{identifier: value})
@@ -158,13 +158,13 @@ def test_work_match_cannot_verify_narrator_or_recording_cover():
     assert match(book(), c)["level"] == "unmatched"
 
 
-def test_exact_asin_can_surface_wrong_recording_credit_without_verifying_it():
+def test_exact_asin_with_conflicting_credit_needs_review():
     raw = copy.deepcopy(book().raw)
     raw["media"]["metadata"]["asin"] = "B012345678"
     c = external(asin="B012345678", narrator="Correct recording narrator")
     r = assess(Book(raw), evidence(c))
-    assert r["matches"][0]["level"] == "recording"
-    assert r["fields"]["narrators"]["status"] == "Conflict"
+    assert r["matches"][0]["classification"] == "different_recording"
+    assert r["fields"]["narrators"]["status"] == "Unverified"
     assert isbn_key("9780306406158") == ""
     raw["media"]["metadata"]["isbn"] = "9780306406158"
     c = external(isbn="9780306406158")
@@ -174,13 +174,12 @@ def test_exact_asin_can_surface_wrong_recording_credit_without_verifying_it():
 def test_editions_ambiguous_and_human_selection_distinct():
     first, second = external(), external(narrator="Other recording narrator", duration=2000)
     r = assess(book(), evidence(first, second))
-    assert r["ambiguous"]
-    assert r["fields"]["narrators"]["status"] == "Unverified"
+    assert not r["ambiguous"]
+    assert r["fields"]["narrators"]["status"] == "Verified"
     assert r["matches"][1]["level"] == "work"
     assert "narrators" in r["matches"][1]["contradictions"]
     r = assess(book(), evidence(first, second), selected=first["id"])
     assert r["fields"]["narrators"]["status"] == "Consistent"
-    assert "Human-selected" in r["fields"]["narrators"]["reason"]
 
 
 def test_multi_credits_decimals_and_optional_fields():

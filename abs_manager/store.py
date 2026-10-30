@@ -10,13 +10,14 @@ from .audit import analyze
 from .diagnostics import event, local_log
 from .locking import operation_lock
 from .models import Book, compact, digest, validate_target
+from .persistent_state import PersistentState
 
 
 def now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-class Store:
+class Store(PersistentState):
     def __init__(self, path: str | Path):
         self.path = str(Path(path).resolve())
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
@@ -64,6 +65,7 @@ class Store:
                                ("resume_blocked", "TEXT"), ("slow_requests", "TEXT NOT NULL DEFAULT '[]'")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE audits ADD COLUMN {name} {kind}")
+        self._init_persistent_state()
         self.log = local_log(Path(self.path).parent / "audit.log")
 
     def checkpoint(self, audit_id, members, library_identity):
@@ -142,6 +144,8 @@ class Store:
                 saved = {r[0] for r in db.execute("SELECT item_id FROM books WHERE audit_id=?", (audit_id,))}
                 if saved != expected:
                     raise ValueError("Cannot complete an audit until every expected book is saved.")
+            if status == "complete":
+                self._reconcile_import(audit_id, db)
             db.execute("UPDATE audits SET status=?, finished=?, error=? WHERE id=?", (status, now(), error, audit_id))
         event(self.log, audit_id=audit_id, status=status, saved=self.saved_progress(audit_id), error=error)
 
@@ -261,6 +265,23 @@ class Store:
         rows = self.rows("SELECT l.data FROM verification_tasks t JOIN verification_runs r ON r.id=t.run_id "
                          "JOIN verification_lookups l ON l.id=t.lookup_id WHERE r.audit_id=? AND t.item_id=? "
                          "ORDER BY r.id DESC", (audit_id, item_id))
+        if not rows:
+            audit = self.audit(audit_id)
+            book = self.book(audit_id, item_id)
+            from .persistent_state import identity
+            previous = self.rows("SELECT b.raw, b.audit_id FROM books b JOIN audits a ON a.id=b.audit_id "
+                                 "WHERE a.server=? AND a.library=? AND a.status='complete' AND a.id<? "
+                                 "AND b.item_id=? ORDER BY a.id DESC", (audit["server"], audit["library"], audit_id, item_id))
+            for old in previous:
+                prior = Book(json.loads(old["raw"]))
+                if identity(prior) == identity(book) and prior.values == book.values:
+                    rows = self.rows("SELECT l.data FROM verification_tasks t JOIN verification_runs r ON r.id=t.run_id "
+                                     "JOIN verification_lookups l ON l.id=t.lookup_id WHERE r.audit_id=? AND t.item_id=? "
+                                     "ORDER BY r.id DESC", (old["audit_id"], item_id))
+                    if rows:
+                        break
+                else:
+                    break
         latest = {}
         for row in rows:
             data = json.loads(row["data"])
@@ -305,9 +326,38 @@ class Store:
         result = []
         for book in self.books(audit_id):
             annotations = self.verification_annotations(audit_id, book.id)
-            result.append(assess(book, self.verification_evidence(audit_id, book.id), reviews=annotations,
-                                 selected=annotations.get("edition", {}).get("candidate_id"),
-                                 calibre=catalog.get(book.id)))
+            decisions = self.candidate_decisions(audit_id, book.id)
+            valid = [d for d in decisions.values() if d["valid"]]
+            history = self.candidate_decisions(audit_id, book.id, history=True)
+            choice = next((d for d in history if d["decision"] in ("selected", "absent")), None)
+            current_choice = decisions.get(choice["candidate_id"]) if choice else None
+            selected = (choice["candidate_id"] if choice and choice["decision"] == "selected"
+                        and current_choice and current_choice["valid"] and current_choice["decision"] == "selected"
+                        else None)
+            rejected = [d["candidate_id"] for d in valid if d["decision"] in ("rejected", "wrong_book")]
+            report = assess(book, self.verification_evidence(audit_id, book.id), reviews=annotations,
+                            selected=selected, rejected=rejected, calibre=catalog.get(book.id))
+            report["human_decisions"] = self.field_decisions(audit_id, book.id)
+            report["candidate_decisions"] = decisions
+            report["manual_edition"] = (choice if choice and choice["decision"] == "absent"
+                                        and current_choice and current_choice["valid"]
+                                        and current_choice["decision"] == "absent" else None)
+            for field, details in report["fields"].items():
+                details["decision"] = report["human_decisions"].get(field)
+            relevant = [d for d in report["fields"].values() if d["status"] != "Not applicable"]
+            pending = [d for d in relevant if not (d["decision"] and d["decision"]["valid"]
+                       and d["decision"]["decision"] == "confirmed")]
+            if any(d["decision"] and d["decision"]["valid"] and d["decision"]["decision"] == "correction_needed" for d in pending):
+                report["review_status"] = "Correction needed"
+            elif pending and report["match_classification"] in ("different_recording", "wrong_work"):
+                report["review_status"] = "Wrong/uncertain edition"
+            elif not pending:
+                report["review_status"] = "Accepted"
+            elif all(d["decision"] and d["decision"]["valid"] and d["decision"]["decision"] == "unable" for d in pending):
+                report["review_status"] = "Unable to verify"
+            else:
+                report["review_status"] = "Needs review"
+            result.append(report)
         return result
 
     def cancel_verification(self, run_id):
