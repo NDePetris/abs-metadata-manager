@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Protocol
 from urllib.parse import urlencode
 
-from .models import Book, digest
+from .models import Book
 from .verification import candidate
 
 RECORDING_PROVIDERS = frozenset(("audnexus", "audible", *("audible." + region for region in
@@ -45,7 +45,6 @@ class AbsSource:
                 {"provider": self.provider, **query})
             item = candidate(normalized, self.id, url, work_only=self.provider not in RECORDING_PROVIDERS)
             item["raw"] = raw
-            item["id"] = digest({k: v for k, v in item.items() if k != "id"})
             candidates.append(item)
         return {"raw": response, "candidates": candidates}
 

@@ -13,7 +13,7 @@ from .store import now
 from .verification import comparable
 
 
-def start_verification(store, audit_id, source, item_ids, *, refresh=False):
+def start_verification(store, audit_id, source, item_ids, *, refresh=False, query_overrides=None):
     with operation_lock(store.path):
         audit = store.audit(audit_id)
         if audit["status"] != "complete":
@@ -25,12 +25,28 @@ def start_verification(store, audit_id, source, item_ids, *, refresh=False):
             raise ValueError("Select books from this snapshot.")
         if source.targeted_only and len(item_ids) != 1:
             raise ValueError("Open Library supports targeted human-initiated single-book lookups only.")
+        overrides = query_overrides or {}
+        if not isinstance(overrides, dict) or not set(overrides) <= set(item_ids):
+            raise ValueError("Search refinements must refer to selected books.")
         with store.connect() as db:
             cursor = db.execute("INSERT INTO verification_runs(audit_id,source,scope,state,created,updated) "
                                 "VALUES(?,?,?,'paused',?,?)", (audit_id, source.id, source.scope, now(), now()))
             run_id = cursor.lastrowid
             for item_id in item_ids:
                 query = source.query(books[item_id])
+                if item_id in overrides:
+                    refinement = overrides[item_id]
+                    allowed = ({"title", "author"} if source.id.startswith("abs:") else
+                               {"q", "title", "author"} if source.id == "openlibrary" else
+                               {"q"} if source.id == "googlebooks" else set(query))
+                    if (not isinstance(refinement, dict) or not refinement or not set(refinement) <= allowed
+                            or any(not isinstance(v, str) or not v.strip() for v in refinement.values())):
+                        raise ValueError("Unsupported or empty provider search refinement.")
+                    if source.id in ("openlibrary", "googlebooks") or "title" in refinement:
+                        # A replacement title/ASIN must not retain a stale author filter.
+                        query = dict(refinement)
+                    else:
+                        query = {**query, **refinement}
                 key = digest({"source": source.id, "scope": source.scope, "query": query, "schema": 1})
                 cached = None if refresh else db.execute(
                     "SELECT id FROM verification_lookups WHERE cache_key=? "
@@ -114,7 +130,10 @@ def propose_discrepancy(store, audit_id, item_id, field, candidate_id):
         raise ValueError("Read-only field: remediate externally; translator/cover/chapter writes are unsupported.")
     report = next(b for b in store.verification_report(audit_id) if b["item_id"] == item_id)
     matched = next((m for m in report["matches"] if m["candidate_id"] == candidate_id), None)
-    if not matched or matched["level"] != "recording" or report["ambiguous"] and report["selected_candidate"] != candidate_id:
+    human_recording = (matched and report["selected_candidate"] == candidate_id and not matched.get("rejected")
+                       and matched["classification"] != "wrong_work" and not matched["candidate"].get("work_only"))
+    if (not matched or matched.get("rejected") or
+            not human_recording and (matched["level"] != "recording" or report["ambiguous"])):
         raise ValueError("A corroborated recording and explicit selection of ambiguous editions are required.")
     item = matched["candidate"]
     if field not in item["values"]:
