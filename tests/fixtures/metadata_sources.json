@@ -1,0 +1,5 @@
+{
+  "abs": [{"title": "Example", "author": "Author One", "narrator": "Narrator One", "asin": "B012345678", "duration": 20, "language": "English", "series": "Example Series", "seriesNumber": "2.5", "cover": "https://example.invalid/cover.jpg", "url": "https://example.invalid/recording"}],
+  "openlibrary": {"docs": [{"key": "/works/OL1W", "title": "Example", "author_name": ["Author One"]}]},
+  "googlebooks": {"items": [{"id": "synthetic-volume", "volumeInfo": {"title": "Example", "authors": ["Author One"], "industryIdentifiers": [{"type": "ISBN_13", "identifier": "9780306406157"}]}}]}
+}

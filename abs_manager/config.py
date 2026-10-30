@@ -47,7 +47,7 @@ class Settings:
     token: str = field(repr=False)
     executable: str = "abs-cli"
     interval: float = 1.5
-    timeout: float = 45
+    timeout: float = 90
 
     def __post_init__(self):
         object.__setattr__(self, "server", server_url(self.server))
@@ -64,4 +64,4 @@ def defaults() -> dict:
             "executable": detect_cli(os.getenv("ABS_CLI_PATH", "")),
             "library": os.getenv("ABS_LIBRARY") or saved.get("defaultLibrary") or "",
             "interval": float(os.getenv("ABS_MM_INTERVAL", "1.5")),
-            "timeout": float(os.getenv("ABS_MM_TIMEOUT", "45"))}
+            "timeout": float(os.getenv("ABS_MM_TIMEOUT", "90"))}

@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from conftest import FakeAdapter
+import pytest
+from conftest import FakeAdapter, make_book
 from streamlit.testing.v1 import AppTest
 
 from abs_manager.adapter import AdapterError, CliAdapter
@@ -190,4 +191,66 @@ def test_editing_an_approved_field_defaults_back_to_pending(setup, monkeypatch):
     saved = next(f for f in store.findings(aid) if f["id"] == fid)
     assert saved["target"] == "A separately reviewed title"
     assert saved["status"] == "pending"
+    assert not api.writes
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_library_resume_button_and_persistent_failure_diagnostics(tmp_path, monkeypatch, changed):
+    path = tmp_path / "resume.sqlite3"
+    monkeypatch.setenv("ABS_MM_DB", str(path))
+    api = FakeAdapter([make_book(item_id="a"), make_book(item_id="b")])
+    store = Store(path)
+    original = api.item
+
+    def interrupted_item(item_id):
+        if item_id == "b":
+            raise AdapterError("items get item_id=b failed: timeout; retries=2; exit_code=None")
+        return original(item_id)
+
+    api.item = interrupted_item
+    with pytest.raises(AdapterError):
+        run_audit(store, api, api.libraries()[0])
+    api.item = original
+    api.reads.clear()
+    if changed:
+        api.items["a"]["relPath"] = "changed/path"
+    at = AppTest.from_file(str(APP), default_timeout=30)
+    at.session_state["adapter"] = api
+    at.session_state["library"] = api.libraries()[0]
+    at.run()
+    assert any("Saved progress: 1 / 2" in c.value for c in at.caption)
+    assert any("items get item_id=b" in e.value for e in at.error)
+    assert not widget(at, "button", "Resume audit").disabled
+    for page in ("Review", "Apply", "Library"):
+        navigate(at, page)
+    assert not api.reads  # Rendering and navigation cannot revalidate remotely.
+    widget(at, "button", "Resume audit").click().run()
+    assert not at.exception
+    if changed:
+        assert widget(at, "button", "Resume audit").disabled
+        assert any("paths changed" in i.value for i in at.info)
+        assert not api.reads
+        assert store.audit(1)["status"] == "interrupted"
+    else:
+        assert store.audit(1)["status"] == "complete"
+        assert api.reads == ["b"]
+        assert not any("Latest audit error" in e.value for e in at.error)
+    assert not api.writes
+
+
+def test_ebook_library_warning_does_not_change_selection(tmp_path, monkeypatch):
+    path = tmp_path / "ebook.sqlite3"
+    monkeypatch.setenv("ABS_MM_DB", str(path))
+    raw = make_book()
+    raw["media"].update(audioFiles=[], duration=0, ebookFile={"ext": ".epub"})
+    api = FakeAdapter([raw])
+    store = Store(path)
+    aid = run_audit(store, api, api.libraries()[0])
+    at = AppTest.from_file(str(APP), default_timeout=30)
+    at.session_state["adapter"] = api
+    at.session_state["library"] = api.libraries()[0]
+    at.run()
+    assert any("mostly ebooks" in w.value for w in at.warning)
+    assert at.session_state["library"]["id"] == "library-a"
+    assert store.audit(aid)["status"] == "complete"
     assert not api.writes

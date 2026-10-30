@@ -15,7 +15,16 @@ from abs_manager.locking import BusyError, operation_lock
 from abs_manager.models import FIELDS, compact
 from abs_manager.sample import sample_audit
 from abs_manager.store import Store
-from abs_manager.workflow import SafetyError, Workflow, confirmation, import_previous, preview, run_audit
+from abs_manager.verification_ui import verification_view
+from abs_manager.workflow import (
+    SafetyError,
+    Workflow,
+    confirmation,
+    import_previous,
+    preview,
+    resume_unavailable,
+    run_audit,
+)
 
 load_dotenv(ROOT / ".env")
 st.set_page_config(page_title="Audiobookshelf Metadata Manager", layout="wide", initial_sidebar_state="auto")
@@ -40,9 +49,31 @@ def progress_bar():
     bar = st.progress(0, text="Starting sequential operation…")
 
     def update(done, total, title):
-        bar.progress(done / max(total, 1), text=f"{done} / {total} · {title}")
+        bar.progress(min(done / max(total, 1), 1.0), text=f"{done} / {total or '?'} · {title}")
 
     return update
+
+
+def audit_action(store, adapter, library, resume_id=None):
+    status = st.empty()
+
+    def diagnostic(record):
+        target = record.get("item_id", f"page {record['page']}" if "page" in record else "libraries")
+        status.info(f"{record['operation']} · {target} · attempt {record['attempt']} / 3 · "
+                    f"{record['state']} · {record['category']} · {record['duration']:.3f}s · "
+                    f"exit code {record['exit_code']}")
+
+    try:
+        aid = run_audit(store, adapter, library, progress_bar(), resume_id=resume_id, diagnostic=diagnostic)
+    except (AdapterError, SafetyError, BusyError, ValueError, KeyError) as exc:
+        latest = store.latest(adapter.server, library["id"])
+        if latest:
+            st.session_state["snapshot_choice"] = latest["id"]
+        st.error(str(exc))
+        # Render persisted progress and its diagnostic below, including after another rerun.
+        return
+    st.session_state["snapshot_choice"] = aid
+    flash("Audit complete. Proposals remain pending until you explicitly approve fields in Review.")
 
 
 def settings_view(store):
@@ -91,6 +122,8 @@ def settings_view(store):
                                   key="library_choice")
             st.session_state["library"] = next(lib for lib in libraries if lib["id"] == chosen)
             st.caption("ABS uses mediaType=book for audiobooks and ebooks. Audio items are writable; ebooks stay read-only.")
+            if "book" in st.session_state["library"]["name"].casefold() and "audio" not in st.session_state["library"]["name"].casefold():
+                st.warning("This library name suggests ebooks. Verify your selection; Calibre-managed ebooks remain read-only.")
         if st.button("Disconnect"):
             for key in ("adapter", "connection_result", "connection_error", "library"):
                 st.session_state.pop(key, None)
@@ -131,7 +164,7 @@ def choose_snapshot(store):
     if audit["read_only"]:
         st.info("Offline snapshot · read-only. Approval and Apply require a fresh live audiobook audit.")
     elif audit["status"] != "complete":
-        st.warning("This audit is incomplete. Partial observations are retained; run another whole-library audit to review changes.")
+        st.warning("This audit is incomplete. Saved progress is retained. Resume after validation or start a fresh audit; approvals and writes are disabled.")
     st.caption(f"Source: {audit['server']} · Library ID: {audit['library']}")
     return audit
 
@@ -144,10 +177,9 @@ def library_view(store):
         st.write(f"**Connected:** {adapter.server} / {library['name']}")
         if st.button("Audit whole library", type="primary"):
             with st.spinner("Reading pages and expanded items, one call at a time…"):
-                aid = run_audit(store, adapter, library, progress_bar())
-            st.session_state["snapshot_choice"] = aid
-            flash("Audit complete. Every proposal starts pending; open Review to make decisions.")
-        st.caption("New audits expire prior approvals. Use Streamlit’s Stop control to interrupt; incomplete audits cannot be applied.")
+                audit_action(store, adapter, library)
+        st.caption("New audits expire prior approvals. Resume continues the same incomplete snapshot and pending decisions. "
+                   "Use Streamlit’s Stop control to interrupt; incomplete audits cannot be approved or applied.")
     else:
         st.info("Open Settings to connect and select your audiobook library.")
     audit = choose_snapshot(store)
@@ -160,6 +192,30 @@ def library_view(store):
             flash("Loaded six synthetic examples. No server connection or metadata writes.")
         return
     books = store.books(audit["id"])
+    st.caption(f"Saved progress: {len(books)} / {audit['expected'] if audit['expected'] is not None else '?'} books")
+    if audit["error"]:
+        st.error(f"Latest audit error: {audit['error']}")
+    if audit["status"] in ("running", "interrupted") and not audit["read_only"]:
+        reason = resume_unavailable(store, audit, adapter.server, library) if adapter and library else (
+            "Connect to the original server and select the original library in Settings.")
+        if reason:
+            st.info(f"Resume unavailable: {reason}")
+        else:
+            st.caption("Resume checks current membership and saved identities/paths before reusing books. A changed library requires a fresh audit.")
+        if st.button("Resume audit", disabled=bool(reason)):
+            audit_action(store, adapter, library, resume_id=audit["id"])
+            st.rerun()
+    slow = json.loads(audit["slow_requests"])
+    with st.expander("Audit diagnostics · slowest item requests"):
+        st.caption(f"Rotating local log: {store.log.handlers[0].baseFilename} (1 MB × 4 files). "
+                   "Stderr is reduced to recognized HTTP/connection diagnostics; raw output is withheld.")
+        if slow:
+            st.dataframe(slow, hide_index=True, width="stretch")
+        else:
+            st.caption("No item timings recorded for this snapshot.")
+    if books and sum(not b.is_audio for b in books) > len(books) / 2:
+        st.warning("This selected library appears to contain mostly ebooks. Check the library selection in Settings. "
+                   "Ebooks remain read-only; Calibre is authoritative.")
     findings = store.findings(audit["id"])
     st.write(f"**{len(books)} books** · {sum(b.is_audio for b in books)} with audio · "
              f"{sum(f['actionable'] for f in findings)} correction proposals · "
@@ -397,20 +453,22 @@ def main():
     store = Store(os.getenv("ABS_MM_DB", str(ROOT / "data" / "metadata.sqlite3")))
     with st.sidebar:
         st.header("Metadata Manager")
-        page = st.radio("Workspace", ["Library", "Review", "Apply", "History", "Settings"])
+        page = st.radio("Workspace", ["Library", "Verification", "Review", "Apply", "History", "Settings"])
         adapter = st.session_state.get("adapter")
         st.caption(f"Connected · {adapter.server}" if adapter else "Local workspace · disconnected")
         st.divider()
         st.caption("Audit → Review → Preview → Confirm → Verify")
     if message := st.session_state.pop("flash", None):
         st.success(message)
-    views = {"Library": library_view, "Review": review_view, "Apply": apply_view,
+    views = {"Library": library_view, "Verification": lambda s: verification_view(s, choose_snapshot),
+             "Review": review_view, "Apply": apply_view,
              "History": history_view, "Settings": settings_view}
     try:
         views[page](store)
     except (AdapterError, SafetyError, BusyError, ValueError, KeyError) as exc:
         st.error(str(exc))
-        st.caption("No automatic retry. Check Settings, run a fresh audit for stale metadata, or reconcile History for uncertain updates.")
+        st.caption("Read-only transient requests use up to three attempts. Resume interrupted audits from Library; "
+                   "start fresh if the library changed. Uncertain writes require reconciliation in History and are never retried automatically.")
 
 
 if __name__ == "__main__":

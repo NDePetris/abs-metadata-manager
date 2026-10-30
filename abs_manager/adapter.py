@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -11,12 +12,17 @@ from typing import Protocol
 
 import requests
 
-from .config import Settings, cli_config
+from .config import ROOT, Settings, cli_config
+from .diagnostics import event, identifier, local_log, stderr_summary
 from .models import Book, payload
 
 
 class AdapterError(RuntimeError):
     pass
+
+
+class InventoryChanged(AdapterError):
+    """A verified identity/membership mismatch requires a new snapshot."""
 
 
 class Adapter(Protocol):
@@ -38,36 +44,92 @@ class CliAdapter:
         self.warnings: list[str] = []
         self.version = ""
         self._last = 0.0
+        self.diagnostic = lambda record: None
+        self.log = local_log(ROOT / "data" / "audit.log")
 
     def _pace(self):
         time.sleep(max(0, self.settings.interval - (time.monotonic() - self._last)))
         self._last = time.monotonic()
 
-    def _run(self, args: list[str], body: str | None = None, parse: bool = True):
-        self._pace()
+    def _run(self, args: list[str], body: str | None = None, parse: bool = True, validate=None):
+        # Positive allowlist: mutations (including rollback's update) always get ONE attempt.
+        readonly = body is None and tuple(args[:2]) in {
+            ("libraries", "list"), ("items", "list"), ("items", "get"),
+            ("metadata", "providers"), ("metadata", "search")}
+        mutation = args[:2] == ["items", "update"] and "--stdin" in args
+        operation = " ".join(args[:2]) if args[0] != "--version" else "version"
+        target = {}
+        for flag, key in (("--id", "item_id"), ("--page", "page")):
+            if flag in args:
+                target[key] = identifier(args[args.index(flag) + 1], self.settings.token)
         env = dict(os.environ, ABS_SERVER=self.server, ABS_TOKEN=self.settings.token, ABS_DEBUG="0")
-        try:
-            result = subprocess.run(
-                [self.settings.executable, *args], input=body, capture_output=True, check=False,
-                text=True, encoding="utf-8", errors="replace", env=env,
-                timeout=self.settings.timeout, shell=False,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise AdapterError("CLI timed out. A submitted update may have reached the server; reconcile History.") from exc
-        except OSError as exc:
-            raise AdapterError("Cannot start abs-cli. Check the executable path in Settings.") from exc
-        # Avoid exposing untrusted server response bodies or tokens in UI/errors.
-        if result.returncode:
-            raise AdapterError(f"abs-cli exited with code {result.returncode}. Check connectivity, API key and permissions.")
-        if "WARN" in result.stderr and "abs-cli reported a compatibility warning; see Settings." not in self.warnings:
-            self.warnings.append("abs-cli reported a compatibility warning; see Settings.")
-        if not parse:
-            return result.stdout.strip()
-        try:
-            return json.loads(result.stdout)
-        except ValueError as exc:
-            raise AdapterError("abs-cli returned invalid JSON. Update compatibility must be checked.") from exc
+        for attempt in range(1, (3 if readonly else 1) + 1):
+            self._pace()
+            record = {"operation": operation, **target, "attempt": attempt, "retry_count": attempt - 1,
+                      "duration": 0.0, "exit_code": None, "category": "pending", "state": "requesting"}
+            self.diagnostic(record.copy())
+            started = time.monotonic()
+            category, detail, code = "ok", "", None
+            try:
+                result = subprocess.run(
+                    [self.settings.executable, *args], input=body, capture_output=True, check=False,
+                    text=True, encoding="utf-8", errors="replace", env=env,
+                    timeout=self.settings.timeout, shell=False,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+                code = result.returncode
+                if code:
+                    detail = stderr_summary(result.stderr, self.settings.token)
+                    statuses = re.findall(r"\b[1-5]\d\d\b", detail)
+                    if any(s in statuses for s in ("401", "403")) or re.search(
+                            r"unauthorized|forbidden", detail, re.IGNORECASE):
+                        category = "authorization"
+                    elif any(s in statuses for s in ("429", "502", "503", "504")):
+                        category = "transient_http"
+                    elif statuses:
+                        category = "permanent_http"
+                    elif re.search(r"ECONNRESET|connection reset", detail, re.IGNORECASE):
+                        category = "connection_reset"
+                    elif re.search(r"ETIMEDOUT|timed out|timeout", detail, re.IGNORECASE):
+                        category = "timeout"
+                    else:
+                        category = "cli_error"
+                else:
+                    try:
+                        value = json.loads(result.stdout) if parse else result.stdout.strip()
+                    except ValueError:
+                        category = "malformed_response"
+                    if category == "ok" and validate:
+                        try:
+                            validate(value)
+                        except (ValueError, TypeError, KeyError, AttributeError):
+                            category = "invalid_schema"
+            except subprocess.TimeoutExpired as exc:
+                category, detail = "timeout", stderr_summary(exc.stderr, self.settings.token)
+            except ConnectionResetError:
+                category = "connection_reset"
+            except OSError:
+                category = "executable_error"
+            retry = readonly and attempt < 3 and category in {"timeout", "connection_reset", "transient_http"}
+            record.update(duration=round(time.monotonic() - started, 3), exit_code=code, category=category,
+                          stderr=detail, state="retrying" if retry else "ok" if category == "ok" else "failed")
+            event(self.log, **record)
+            self.diagnostic(record.copy())
+            if category == "ok":
+                if "WARN" in result.stderr and "abs-cli reported a compatibility warning; see Settings." not in self.warnings:
+                    self.warnings.append("abs-cli reported a compatibility warning; see Settings.")
+                return value
+            if retry:
+                time.sleep(2 ** (attempt - 1))
+                continue
+            context = " ".join(f"{key}={val}" for key, val in target.items())
+            message = (f"{operation} {context} failed: {category}; duration={record['duration']:.3f}s; "
+                       f"retries={attempt - 1}; exit_code={code}. {detail}")
+            if mutation:
+                message += " A submitted update may have reached the server; reconcile History."
+            elif readonly:
+                message += " Read-only request; saved audit progress is retained."
+            raise AdapterError(message) from None
 
     def probe(self) -> dict:
         self.version = self._run(["--version"], parse=False)
@@ -116,22 +178,52 @@ class CliAdapter:
                                "abs-cli 1.2.0 can retry PATCH after refreshing. Read-only auditing is available.")
 
     def libraries(self) -> list[dict]:
-        response = self._run(["libraries", "list"])
+        response = self._run(["libraries", "list"], validate=lambda r: self._schema(r, "libraries"))
         if not isinstance(response, dict) or not isinstance(response.get("libraries"), list):
             raise AdapterError("Unexpected library response schema.")
         return response["libraries"]
 
     def page(self, library: str, page: int, limit: int) -> dict:
         response = self._run(["items", "list", "--library", library, "--limit", str(limit), "--page", str(page),
-                              "--sort", "addedAt"])
+                              "--sort", "addedAt"], validate=lambda r: self._schema(r, "results"))
         if not isinstance(response, dict) or not isinstance(response.get("results"), list):
             raise AdapterError("Unexpected inventory response schema.")
         return response
 
     def item(self, item_id: str) -> dict:
-        response = self._run(["items", "get", "--id", item_id, "--expanded"])
+        response = self._run(["items", "get", "--id", item_id, "--expanded"], validate=Book)
         Book(response)  # Reject minified schemas before auditing or updating.
         return response
+
+    def metadata_providers(self) -> list[dict]:
+        response = self._run(["metadata", "providers"])
+        try:
+            providers = response["providers"]["books"]
+            if not isinstance(providers, list) or not all(
+                    isinstance(p, dict) and isinstance(p.get("value"), str) and p["value"] for p in providers):
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            raise AdapterError("Unexpected metadata provider schema.") from None
+        return sorted(providers, key=lambda p: (not any(
+            x in (p["value"] + p.get("text", "")).lower() for x in ("audible", "audnexus")), p["value"]))
+
+    def metadata_search(self, provider: str, query: dict) -> list[dict]:
+        if not provider or not query.get("title"):
+            raise ValueError("Select a discovered provider and a nonempty title/ASIN.")
+        args = ["metadata", "search", "--provider", provider, "--title", query["title"]]
+        if query.get("author"):
+            args += ["--author", query["author"]]
+        response = self._run(args)
+        if not isinstance(response, list):
+            raise AdapterError("Unexpected metadata search schema (expected candidate array).")
+        if not all(isinstance(row, dict) for row in response):
+            raise AdapterError("Invalid metadata search candidate.")
+        return response
+
+    @staticmethod
+    def _schema(response, key):
+        if not isinstance(response, dict) or not isinstance(response.get(key), list):
+            raise TypeError("Unexpected response schema.")
 
     def update(self, item_id: str, changes: dict) -> None:
         self.check_write_capability()
@@ -147,9 +239,66 @@ class CliAdapter:
             return path.read_bytes()
 
 
-def inventory(adapter: Adapter, library: str, progress: Callable[[int, int, str], None], limit=50):
-    """Never declare an incomplete or shifting pagination run complete."""
-    seen: set[str] = set()
+def item_identity(row: dict) -> dict:
+    if (not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]
+            or not row.get("libraryId") or not (row.get("path") or row.get("relPath"))
+            or row.get("mediaType") != "book"):
+        raise AdapterError("Inventory lacks a verifiable book identity/path; run a fresh audit.")
+    return {key: row.get(key) for key in ("id", "libraryId", "path", "relPath", "ino", "mediaType")}
+
+
+class PublicMetadataTransport:
+    """GET-only documented bibliographic APIs. No ABS credentials enter this transport."""
+
+    def __init__(self, google_key="", contact="", timeout=20):
+        self.google_key, self.timeout = google_key, timeout
+        self.agent = "abs-metadata-manager/0.2 (personal metadata review" + ("; " + contact if contact else "") + ")"
+        self._last = 0.0
+
+    def public_search(self, source, query):
+        if source not in ("openlibrary", "googlebooks"):
+            raise ValueError("Unsupported source.")
+        if source == "googlebooks" and not self.google_key:
+            raise AdapterError("Google Books requires a configured API key; ABS and Open Library need none.")
+        url = {"openlibrary": "https://openlibrary.org/search.json",
+               "googlebooks": "https://www.googleapis.com/books/v1/volumes"}[source]
+        params = dict(query)
+        if source == "openlibrary":
+            params.update(limit=10, fields="key,title,author_name")
+        else:
+            params.update(maxResults=10, key=self.google_key)
+        for attempt in range(3):
+            time.sleep(max(0, 1.5 - (time.monotonic() - self._last)))
+            self._last = time.monotonic()
+            try:
+                response = requests.get(url, params=params, headers={"User-Agent": self.agent},
+                                        timeout=self.timeout, allow_redirects=False)
+                if response.status_code in (429, 502, 503, 504):
+                    # Long Retry-After values stop this action instead of ignoring the server's request.
+                    retry_after = response.headers.get("Retry-After", "")
+                    if retry_after and (not retry_after.isdigit() or int(retry_after) > 30):
+                        raise AdapterError("Provider rate limited/unavailable; retry later explicitly.")
+                    if attempt < 2:
+                        time.sleep(max(2 ** attempt, int(retry_after or 0)))
+                        continue
+                response.raise_for_status()
+                result = response.json()
+                if not isinstance(result, dict):
+                    raise TypeError
+                return result
+            except (requests.Timeout, requests.ConnectionError):
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise AdapterError("Public provider unavailable: timeout/connection failure after three read attempts.") from None
+            except (requests.RequestException, ValueError, TypeError):
+                # requests exceptions can include the URL/API key. Never propagate them.
+                raise AdapterError("Public provider unavailable: HTTP failure, rate limit, or invalid response.") from None
+
+
+def membership(adapter: Adapter, library: str, progress: Callable = lambda *args: None, limit=50) -> dict:
+    """Enumerate the entire membership before any expanded requests or reuse."""
+    seen = {}
     expected = None
     for page_number in range(10000):
         page = adapter.page(library, page_number, limit)
@@ -159,23 +308,36 @@ def inventory(adapter: Adapter, library: str, progress: Callable[[int, int, str]
         if expected is None:
             expected = total
         if total != expected or page.get("page", page_number) != page_number:
-            raise AdapterError("Library changed during pagination; run a fresh audit.")
+            raise InventoryChanged(f"items list page={page_number}: library changed during pagination; run a fresh audit.")
         rows = page["results"]
         if not rows and len(seen) != total:
             raise AdapterError("Inventory stopped before the reported total.")
         for row in rows:
-            item_id = row.get("id")
+            identity = item_identity(row)
+            item_id = identity["id"]
             if not item_id or item_id in seen or row.get("libraryId") != library:
                 raise AdapterError("Duplicate, missing, or wrong-library inventory identity.")
-            seen.add(item_id)
-            raw = adapter.item(item_id)
-            book = Book(raw)
-            if book.id != item_id or book.identity["libraryId"] != library:
-                raise AdapterError("Expanded item identity differs from inventory.")
-            yield book
-            progress(len(seen), total, book.values["title"] or item_id)
+            seen[item_id] = identity
+        progress(len(seen), total, f"Checking membership · page {page_number}")
         if len(seen) > total:
             raise AdapterError("Inventory exceeds reported total.")
         if len(seen) == total:
-            return
+            return seen
     raise AdapterError("Pagination safety limit reached.")
+
+
+def inventory(adapter: Adapter, library: str, progress: Callable[[int, int, str], None], limit=50,
+              *, members=None, saved=None):
+    members = membership(adapter, library, limit=limit) if members is None else members
+    saved = saved or {}
+    for item_id, book in saved.items():
+        if item_id not in members or book.identity != members[item_id]:
+            raise InventoryChanged("Saved item identity/path differs from current membership; start a fresh audit.")
+    for index, (item_id, identity) in enumerate(members.items(), 1):
+        book = saved.get(item_id)
+        if book is None:
+            book = Book(adapter.item(item_id))
+            if book.identity != identity:
+                raise InventoryChanged("items get: expanded item identity/path differs from inventory; start a fresh audit.")
+            yield book
+        progress(index, len(members), f"Item {item_id} · saved")

@@ -2,6 +2,27 @@
 
 Development date: 2026-10-28, Windows x64, Python 3.13.14.
 
+## Independent verification — 2026-10-28
+
+- Initial HEAD was `7e84ca2`. A refreshed comparison against `origin/main` confirms that this branch also includes that resumable-audit reliability commit, which has not yet reached `main`. Implementation is isolated on `codex/metadata-verification`; resumable audits and write-safety behavior remain covered.
+- Final full suite: **176 passed in 28.02 seconds**, with no skips in this workspace. Ruff, `git diff --check`, `pip check`, and `start.ps1 -Check` passed. The sandbox's temporary-directory restrictions required running pytest with normal local permissions; tests used only synthetic tokens and fake/loopback transports.
+- Installed abs-cli 1.2.0 full help and tagged CLI/ABS source were inspected. A real CLI subprocess discovered providers and searched candidates against a loopback server using GET only. Tests verify query/source/date provenance, candidate-array parsing, duration conversion, cache reuse, interruption/resumption, cancellation, failed-refresh evidence retention, rate limits, timeouts, and offline reports.
+- Regressions cover all books (including a book with zero findings), audiobook/ebook requirements, Calibre numeric folders/titles, ISBN checksums and ISBN-10 equivalence, ASIN/ISBN matching, ambiguity, distinct recording credits, multi-author/narrator/translator arrays, decimals, duplicate/promotional versus legitimate subtitles, generic/missing/invalid chapter timing, covers, embedded-tag staleness, manual outcomes, and pending corrections.
+- Streamlit AppTest covers empty/sample reports, complete matrices, filters, explicit discovery/preparation/start, cancellation, human review/edition selection, ebook correction refusal, and no remote writes/refetches on rendering/reruns. An isolated running preview was inspected in the actual app browser panel with six synthetic records. Native controls/tables preserve the desktop design. The Impeccable detector returned no findings; its pre-existing design-sidecar drift warning was left unchanged.
+- The ignored historical export yielded **110 books × 11 fields = 1,210 assessments**, 110 with embedded evidence, 110 with cover paths, and 106 with chapter arrays. Without external lookups it correctly reported zero externally verified fields. Only aggregate counts were retained in documentation.
+- Live provider availability, current production coverage, and the 656-ebook collection were not tested: no configured production credentials or Calibre catalog were available. No production metadata write, scan, Quick Match, cover/chapter mutation, or Calibre mutation occurred. See [Verification guide](VERIFICATION.md) for source limitations and exact startup/validation instructions.
+
+## Audit reliability update — 2026-10-28
+
+- Full suite: **128 passed in 20.44 seconds**. Ruff (`python -m ruff check app.py abs_manager tests`) and `git diff --check` passed.
+- Added interrupted/resumed snapshot coverage, process-restart recovery (including abandoned `running` status), repeated exhausted retries, membership/identity/path and folder changes, legacy schema migration, checkpoint completeness, lock exclusion, and permanent/malformed response failures.
+- Streamlit AppTest covers saved counts, durable latest errors, Resume success, changed-library refusal and explanation, no remote requests on navigation/reruns, and ebook warnings without changing the selection. The native UI mechanical detector reported no findings.
+- Official abs-cli 1.2.0 was checked against a synthetic loopback HTTP 502: it exits 2 and emits `API request failed: 502 Bad Gateway` on stderr. The new protocol regression exhausts three transient reads for the second book, preserves the first book, reopens the Store, resumes without re-fetching the first expanded book, and completes using GETs only.
+- Tests cover credential/response-body exclusion from errors and rotating logs, operation/page context, request timeout configuration, exponential backoff, and single-attempt metadata updates. Existing approval, durable journal, reconciliation, rollback, and unrelated-metadata protection tests remain passing.
+- The sandbox's temporary-directory/loopback restrictions prevented the first test invocation from completing normally. The final full suite ran with normal local permissions; transports used only fake adapters or a loopback simulator and synthetic tokens.
+- Existing production SQLite progress was inspected using a read-only connection: audit #2 has 51 saved Audiobooks records; audit #3 has 56 saved Books records. Neither has the membership checkpoint required to prove unchanged membership. Their history is retained; the UI explains the one-time fresh-audit requirement. Recovery steps are in [README.md](../README.md#interrupted-read-only-audits).
+- No production metadata request or production write was performed. Cloudflare connection routing is unchanged. No snapshot status, approval, production journal, or production metadata was edited during development.
+
 ## Verified locally
 
 - Official abs-cli 1.2.0 Windows x64 binary: `--version`, full help for list/get/update/libraries, tagged transport and config source, and published SHA-256 comparison.

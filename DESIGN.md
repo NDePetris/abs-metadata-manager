@@ -58,7 +58,7 @@ Streamlit's configured `sans serif` family supplies the interface typography. Th
 
 ## Layout
 
-The app uses `layout="wide"` and `initial_sidebar_state="auto"`. The native sidebar contains a Workspace radio navigation, connection status, a divider, and the operation sequence. Its views are Library, Review, Apply, History, and Settings.
+The app uses `layout="wide"` and `initial_sidebar_state="auto"`. The native sidebar contains a Workspace radio navigation, connection status, a divider, and the operation sequence. Its views are Library, Verification, Review, Apply, History, and Settings.
 
 Main views use a vertical working sequence: page title and explanation, source/snapshot context, filters or summary, a full-width data table, then a selected-record inspector. Tables use `width="stretch"` and hide the row index. Wide tables retain native horizontal scrolling; information is not removed to fit the viewport.
 
@@ -85,6 +85,8 @@ Library exposes title, authors, narrators, series, media type, and cover presenc
 Review exposes the field, current/proposed values, kind, confidence, status, and reason in its findings table. The selected finding repeats the values side by side, with evidence in an expander. Preserve the full data through scrolling and inspectors rather than truncating the underlying values.
 
 ### Inputs and filters
+
+Verification extends the same native table-and-inspector layout with field coverage, a full-library status matrix, source coverage disclosure, and side-by-side saved/embedded/folder/candidate values. Status and ambiguity filters are explicit native controls. Online discovery, run preparation, start/resume, cancellation, catalog import, manual review, and pending proposals use labeled forms. External status and human review outcomes remain separate text columns. The synthetic six-book view was inspected in the actual app panel; tables scroll without hiding the complete underlying values.
 
 Use labeled native text inputs, text areas, selectboxes, multiselects, checkboxes, and number inputs. Library has a text search. Review filters by field, confidence, and review status, with a correction-only checkbox. Status is expressed in text and table columns, not only through color.
 
