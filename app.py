@@ -23,7 +23,7 @@ from abs_manager.workflow import (
     run_audit,
 )
 
-st.set_page_config(page_title="Audiobookshelf Metadata Manager", layout="wide", initial_sidebar_state="auto")
+st.set_page_config(page_title="Audiobookshelf Metadata Manager", layout="wide", initial_sidebar_state="collapsed")
 
 
 def display(value):
@@ -98,6 +98,7 @@ def settings_view(store):
             st.session_state["server"] = adapter.server
             st.session_state["adapter"] = adapter
             st.session_state["connection_result"] = result
+            st.session_state.pop("credential_error", None)
         except (AdapterError, BusyError, ValueError, KeyError) as exc:
             st.session_state["connection_error"] = str(exc)
         # Refresh the sidebar too, including when replacing a successful connection fails.
@@ -107,7 +108,7 @@ def settings_view(store):
     connection = st.session_state.get("connection_result")
     adapter = st.session_state.get("adapter")
     if connection and adapter:
-        st.success("Connected. Select an audiobook library below.")
+        st.success("Connected. Use Library in the sidebar throughout the workspace.")
         st.write(f"**Server:** {adapter.server} · **ABS:** {connection['server_version']} · "
                  f"**abs-cli:** {connection['cli_version']}")
         for warning in connection["warnings"]:
@@ -124,6 +125,8 @@ def settings_view(store):
             preferences.save({**prefs, "calibre_executable": calibre_executable, "calibre_library": calibre_library})
     if st.button("Forget saved API key", disabled=not d.get("server")):
         preferences.credential(d["server"], forget=True)
+        st.session_state.pop("credential_error", None)
+        st.success("Saved API key forgotten. Enter a new key to reconnect.")
     st.divider()
     st.subheader("Local data")
     st.code(store.path, language=None)
@@ -177,14 +180,14 @@ def library_view(store):
         st.caption("New imports expire write approvals and preserve valid field acceptance. Resume continues the same incomplete snapshot. "
                    "Use Streamlit’s Stop control to interrupt; incomplete audits cannot be approved or applied.")
     else:
-        st.info("Open Settings to connect and select your audiobook library.")
+        st.info("Connect in Settings, then use Library in the sidebar.")
     audit = active_inventory(store)
     attempt = store.latest(adapter.server, library["id"]) if adapter and library else None
     if attempt and attempt["status"] != "complete":
         audit = attempt
     if audit is None:
         st.subheader("Your first audit")
-        st.write("Connect in Settings, select the audiobook library, and choose Audit whole library.")
+        st.write("Connect in Settings, choose Library in the sidebar, then Refresh Library.")
         if st.button("Load read-only sample library"):
             aid = import_previous(store, sample_audit(), "Synthetic sample library")
             st.session_state["snapshot_choice"] = aid
@@ -221,7 +224,7 @@ def library_view(store):
         st.error(f"Latest audit error: {audit['error']}")
     if audit["status"] in ("running", "interrupted") and not audit["read_only"]:
         reason = resume_unavailable(store, audit, adapter.server, library) if adapter and library else (
-            "Connect to the original server and select the original library in Settings.")
+            "Connect to the original server and choose the original Library in the sidebar.")
         if reason:
             st.info(f"Resume unavailable: {reason}")
         else:
@@ -238,7 +241,7 @@ def library_view(store):
         else:
             st.caption("No item timings recorded for this snapshot.")
     if books and sum(not b.is_audio for b in books) > len(books) / 2:
-        st.warning("This selected library appears to contain mostly ebooks. Check the library selection in Settings. "
+        st.warning("This selected library appears to contain mostly ebooks. Check Library in the sidebar. "
                    "Ebooks remain read-only; Calibre is authoritative.")
 def show_plan(plan):
     st.write(f"**Server:** {plan['server']} · **Library ID:** {plan['library']}")
@@ -348,9 +351,14 @@ def main():
         st.session_state["reconnect_checked"] = True
         saved = preferences.load()
         if saved.get("server", "").startswith(("http://", "https://")):
-            token = preferences.credential(saved["server"])
-            if token:
-                st.session_state["adapter"] = CliAdapter(Settings(saved["server"], token, saved.get("executable", "abs-cli")))
+            try:
+                token = preferences.credential(saved["server"])
+                if token:
+                    st.session_state["adapter"] = CliAdapter(Settings(saved["server"], token, saved.get("executable", "abs-cli")))
+                else:
+                    st.session_state["credential_error"] = preferences.CREDENTIAL_RECOVERY
+            except preferences.CredentialError:
+                st.session_state["credential_error"] = preferences.CREDENTIAL_RECOVERY
     with st.sidebar:
         st.header("Metadata Manager")
         saved = preferences.load()
@@ -364,11 +372,16 @@ def main():
         libraries = {lib["id"]: lib for lib in libraries if lib.get("mediaType") == "book"}
         if libraries:
             ids = list(libraries)
-            chosen = st.selectbox("Library", ids, index=ids.index(saved["library"]) if saved.get("library") in ids else 0,
-                                  format_func=lambda key: libraries[key]["name"])
+            library_key = "global_library:" + server
+            if st.session_state.get(library_key) not in ids:
+                preferred = saved.get("library", st.session_state.get("library", {}).get("id"))
+                st.session_state[library_key] = preferred if preferred in ids else ids[0]
+            chosen = st.selectbox("Library", ids, format_func=lambda key: libraries[key]["name"], key=library_key)
             st.session_state["library"] = libraries[chosen]
             if saved.get("library") != chosen:
                 preferences.save({**saved, "library": chosen})
+        else:
+            st.session_state.pop("library", None)
         page = st.radio("Workspace", ["Import", "Match & Verify", "Changes", "History", "Settings"])
         adapter = st.session_state.get("adapter")
         st.caption(f"Connected · {adapter.server}" if adapter else "Local workspace · disconnected")
@@ -378,6 +391,8 @@ def main():
         st.warning("Recovery required. Open History to reconcile before further writes.")
     if message := st.session_state.pop("flash", None):
         st.success(message)
+    if error := st.session_state.get("credential_error"):
+        st.warning(error)
     views = {"Import": library_view, "Match & Verify": lambda s: verification_view(s, active_inventory),
              "Changes": lambda s: changes_view(s, active_inventory(s), show_plan, progress_bar),
              "History": history_view, "Settings": settings_view}

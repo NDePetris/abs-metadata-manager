@@ -364,9 +364,12 @@ def test_calibre_authoritative_readonly_import(setup):
     raw.update(relPath="Author/Example trunc (653)", path="Author/Example trunc (653)")
     raw["media"].update(audioFiles=[], duration=0)
     store.add_book(aid, Book(raw))
-    text = json.dumps([{"id": 653, "title": "Authoritative title", "authors": ["Author One", "Author Two"],
+    text = json.dumps([{"id": 653, "uuid": "fixture-uuid", "title": "Authoritative title", "authors": ["Author One", "Author Two"],
                         "series": "Example Series", "series_index": 2.5, "identifiers": {"isbn": "9780306406157"}}])
-    assert import_catalog(store, aid, text) == 1
+    assert import_catalog(store, aid, text) == 0  # Folder ID alone cannot override contradictory work evidence.
+    store.confirm_targets(aid, "ebook", {"title": "Authoritative title", "authors": ["Author One", "Author Two"]})
+    assert import_catalog(store, aid, text, "fixture-library",
+                          {"ebook": {"id": 653, "uuid": "fixture-uuid"}}) == 1
     report = next(b for b in store.verification_report(aid) if b["item_id"] == "ebook")
     assert report["calibre_limitation"] is None
     assert report["fields"]["title"]["status"] == "Conflict"

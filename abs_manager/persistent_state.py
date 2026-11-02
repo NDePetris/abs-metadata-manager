@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime
 
 from .locking import operation_lock
-from .models import FIELDS, compact, digest, validate_target
+from .models import FIELDS, compact, digest, review_fields, validate_target
 from .verification import QUALITY_FIELDS, values
 
 
@@ -55,6 +55,11 @@ class PersistentState:
             CREATE TABLE IF NOT EXISTS calibre_catalog_history (
               id INTEGER PRIMARY KEY, audit_id INTEGER NOT NULL REFERENCES audits(id),
               imported TEXT NOT NULL, data TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS calibre_bindings (
+              server TEXT NOT NULL, library TEXT NOT NULL, item_id TEXT NOT NULL,
+              identity_digest TEXT NOT NULL, calibre_library TEXT NOT NULL,
+              calibre_id INTEGER NOT NULL, calibre_uuid TEXT NOT NULL,
+              PRIMARY KEY(server,library,item_id));
             INSERT INTO calibre_catalog_history(audit_id,imported,data)
               SELECT c.audit_id, strftime('%Y-%m-%dT%H:%M:%fZ','now'), c.data
               FROM calibre_catalogs c WHERE NOT EXISTS
@@ -73,8 +78,8 @@ class PersistentState:
             if (audit["read_only"] or audit["status"] != "complete"
                     or self.latest(audit["server"], audit["library"])["id"] != audit_id):
                 raise ValueError("Complete the latest live import first.")
-            if not targets or any(f not in (*FIELDS, "identifiers") for f in targets):
-                raise ValueError("Select supported metadata fields.")
+            if not targets or any(f not in review_fields(book.is_audio) for f in targets):
+                raise ValueError("Select applicable metadata fields.")
             for field, target in targets.items():
                 if field == "identifiers":
                     if book.is_audio or not isinstance(target, dict) or set(target) - {"isbn", "asin"} or any(not isinstance(v, str) for v in target.values()):
@@ -157,6 +162,8 @@ class PersistentState:
             ):
                 raise ValueError("The latest complete audit is required.")
             vals = values(book)
+            if decision == "confirmed" and any(f not in review_fields(book.is_audio) for f in fields):
+                raise ValueError("Select applicable metadata fields.")
             with self.connect() as db:
                 for field in dict.fromkeys(fields):
                     if decision == "reopened":
@@ -412,11 +419,7 @@ class PersistentState:
         decisions = [d for fields in per_item.values() for d in fields.values()]
         unresolved = 0
         for item_id, book in current.items():
-            applicable = set(FIELDS)
-            if not book.is_audio:
-                applicable -= {"narrators", "chapters", "embedded"}
-            if not book.values["series"]:
-                applicable.discard("series_position")
+            applicable = review_fields(book.is_audio)
             if any(
                 not (
                     per_item[item_id].get(field, {}).get("valid")

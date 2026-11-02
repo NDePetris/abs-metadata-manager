@@ -3,7 +3,7 @@
 import streamlit as st
 
 from .calibre import import_catalog, validate_local
-from .models import FIELDS
+from .models import review_fields
 from .verification_ui import display, editor
 from .workflow import Workflow, confirmation, preview
 
@@ -34,6 +34,8 @@ def changes_view(store, audit, show_plan, progress):
     findings += [f for f in store.findings(aid) if f["actionable"] and f["status"] == "approved"
                  and f not in findings]
     books = {b.id: b for b in store.books(aid)}
+    rows = [r for r in rows if r["item_id"] not in books or r["field"] in review_fields(books[r["item_id"]].is_audio)]
+    findings = [f for f in findings if f["item_id"] in books and f["field"] in review_fields(books[f["item_id"]].is_audio)]
     selected = []
     for iid in dict.fromkeys([r["item_id"] for r in rows] + [f["item_id"] for f in findings]):
         st.subheader(books[iid].values["title"] if iid in books else "Removed book · " + iid)
@@ -43,7 +45,7 @@ def changes_view(store, audit, show_plan, progress):
             st.text("Current: " + display(row["current"]) + "\nDesired: " + display(row["proposed"]))
             st.caption(row["evidence"])
             st.caption(f"Calibre verified: {row['calibre_verified'] or 'Not checked'} · ABS observed: {row['abs_observed'] or 'Not checked'}")
-            if iid in books and row["field"] in (*FIELDS, "identifiers") and row["status"] in ("pending", "edited_in_calibre", "verified_in_calibre"):
+            if iid in books and row["field"] in review_fields(books[iid].is_audio) and row["status"] in ("pending", "edited_in_calibre", "verified_in_calibre"):
                 with st.form(f"correction:{row['id']}"):
                     target = editor(row["field"], row["proposed"], f"queue:{row['id']}")
                     edit = st.form_submit_button("Confirm edited correction")
@@ -82,9 +84,21 @@ def changes_view(store, audit, show_plan, progress):
     if st.button("Validate Calibre Changes"):
         from .preferences import load
         settings = load()
-        validate_local(store, aid, settings.get("calibre_executable", "calibredb"), settings.get("calibre_library", ""))
-        st.success("Calibre catalog compared. ABS synchronization is checked separately on refresh.")
+        count = validate_local(store, aid, settings.get("calibre_executable", "calibredb"), settings.get("calibre_library", ""))
+        st.success(f"{count} ebooks matched in Calibre. Unmatched records stay unverified; use Advanced catalog input to associate ambiguous records. ABS synchronization is checked separately on refresh.")
     with st.expander("Advanced catalog input"):
+        st.caption("Use the exact Calibre library folder as context. Ambiguous records require an explicit association; numeric IDs alone cannot verify corrections.")
+        library = st.text_input("Catalog library context")
         upload = st.file_uploader("Calibre catalog JSON", type="json")
-        if st.button("Compare catalog", disabled=upload is None):
-            import_catalog(store, aid, upload.getvalue().decode("utf-8-sig"))
+        if st.button("Compare catalog", disabled=upload is None or not library):
+            count = import_catalog(store, aid, upload.getvalue().decode("utf-8-sig"), library or None)
+            st.success(f"{count} ebooks matched. Correction verification requires a library context and UUID.")
+        ebooks = [b for b in books.values() if not b.is_audio]
+        if ebooks:
+            iid = st.selectbox("Associate ebook", [b.id for b in ebooks], format_func=lambda i: books[i].values["title"])
+            cid = st.number_input("Calibre record ID", min_value=0, step=1)
+            uuid = st.text_input("Calibre record UUID")
+            if st.button("Associate and compare catalog", disabled=upload is None or not library or not uuid):
+                import_catalog(store, aid, upload.getvalue().decode("utf-8-sig"), library,
+                               {iid: {"id": cid, "uuid": uuid}})
+                st.success("Read-only association compared. No Calibre or ABS write was sent.")

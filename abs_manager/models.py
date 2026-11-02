@@ -11,6 +11,11 @@ from typing import Any
 FIELDS = ("title", "subtitle", "authors", "narrators", "series")
 
 
+def review_fields(is_audio: bool) -> tuple[str, ...]:
+    """The same editable/confirmable fields in the UI and local decision store."""
+    return FIELDS if is_audio else ("title", "subtitle", "authors", "series", "identifiers")
+
+
 def compact(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 

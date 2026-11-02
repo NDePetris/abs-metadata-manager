@@ -344,7 +344,8 @@ class Store(PersistentState):
                                         and current_choice["decision"] == "absent" else None)
             for field, details in report["fields"].items():
                 details["decision"] = report["human_decisions"].get(field)
-            relevant = [report["fields"][f] for f in ("title", "subtitle", "authors", "narrators", "series") if report["fields"][f]["status"] != "Not applicable"]
+            from .models import review_fields
+            relevant = [report["fields"][f] for f in review_fields(book.is_audio)]
             pending = [d for d in relevant if not (d["decision"] and d["decision"]["valid"]
                        and d["decision"]["decision"] == "confirmed")]
             if any(d["decision"] and d["decision"]["valid"] and d["decision"]["decision"] == "correction_needed" for d in pending):

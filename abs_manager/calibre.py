@@ -10,7 +10,7 @@ from .store import now
 from .verification import isbn_key, names
 
 
-def import_catalog(store, audit_id, text, library=None):
+def import_catalog(store, audit_id, text, library=None, associations=None):
     catalog = json.loads(text)
     if not isinstance(catalog, list) or not all(isinstance(r, dict) and isinstance(r.get("id"), int)
                                               and isinstance(r.get("title"), str) for r in catalog):
@@ -21,43 +21,78 @@ def import_catalog(store, audit_id, text, library=None):
            not isinstance(row.get("authors", []), (str, list)) or
            row.get("series") is not None and not isinstance(row["series"], str) for row in catalog):
         raise ValueError("Invalid Calibre contributor, series, or identifier schema.")
-    result = {}
+    # Unscoped exports are archived only; numeric IDs cannot associate a book without library context.
+    associations = associations or {}
+    result, bindings = {}, []
+    audit = store.audit(audit_id)
+    from .persistent_state import identity
+    if associations and not library:
+        raise ValueError("An explicit association requires a Calibre library context.")
     captured, fingerprint = now(), digest(catalog)
     with operation_lock(store.path):
         if store.audit(audit_id)["status"] != "complete":
             raise ValueError("Select a completed snapshot.")
+        existing = {r["item_id"]: r for r in store.rows(
+            "SELECT * FROM calibre_bindings WHERE server=? AND library=?", (audit["server"], audit["library"]))}
         for book in store.books(audit_id):
-            if book.is_audio:
+            if book.is_audio or not library:
                 continue
             folder = (book.raw.get("relPath") or book.raw["path"]).replace("\\", "/").rstrip("/")
             folder_id = re.search(r"\((\d+)\)(?:/[^/]+\.epub)?$", folder, re.IGNORECASE)
-            isbn = book.metadata.get("isbn")
+            isbn = isbn_key(book.metadata.get("isbn"))
+            corrections = [r for r in store.corrections(audit_id) if r["item_id"] == book.id
+                           and r["identity_digest"] == identity(book, r["field"])
+                           and r["status"] not in ("discarded", "identity_ambiguous", "needs_review")]
+            bound = existing.get(book.id)
+            # Recover bindings made by versions preceding the binding table.
+            legacy = {(r["calibre_library"], r["calibre_id"], r["calibre_uuid"]) for r in corrections
+                      if r["calibre_library"] and r["calibre_uuid"]}
+            if not bound and len(legacy) == 1:
+                lib, cid, uuid = next(iter(legacy))
+                bound = {"calibre_library": lib, "calibre_id": cid, "calibre_uuid": uuid,
+                         "identity_digest": identity(book)}
+            explicit = associations.get(book.id)
+            titles = {canon(book.values["title"] or "")} | {canon(r["proposed"]) for r in corrections
+                       if r["field"] == "title" and r["accepted"]}
+            author_sets = [{canon(a) for a in book.values["authors"]}] + [
+                {canon(a) for a in r["proposed"]} for r in corrections if r["field"] == "authors" and r["accepted"]]
             matches = []
             for row in catalog:
                 authors = row.get("authors", [])
                 authors = authors.split(" & ") if isinstance(authors, str) else names(authors)
-                id_match = folder_id and str(row["id"]) == folder_id[1]
-                isbn_match = isbn_key(isbn) and row.get("identifiers", {}).get("isbn") and isbn_key(isbn) == isbn_key(
-                    row["identifiers"]["isbn"])
-                work_match = canon(row["title"]) == canon(book.values["title"] or "") and {
-                    canon(a) for a in authors} == {canon(a) for a in book.values["authors"]}
-                if library:
-                    corrections = [r for r in store.corrections(audit_id) if r["item_id"] == book.id]
-                    bound = [r for r in corrections if r["calibre_library"] == library and r["calibre_uuid"]]
-                    titles = {canon(book.values["title"] or "")} | {canon(r["proposed"]) for r in corrections
-                              if r["field"] == "title" and r["accepted"]}
-                    compatible = (canon(row["title"]) in titles and {canon(a) for a in authors} ==
-                                  {canon(a) for a in book.values["authors"]})
-                    if bound:
-                        if not any(r["calibre_uuid"] == row.get("uuid") and r["calibre_id"] == row["id"] for r in bound):
-                            continue
-                    elif not compatible or not row.get("uuid"):
+                compatible = canon(row["title"]) in titles and {canon(a) for a in authors} in author_sets
+                identifiers = [book.metadata] + [r["proposed"] for r in corrections
+                               if r["field"] == "identifiers" and r["accepted"]]
+                if any(book.metadata.get(k) and row.get("identifiers", {}).get(k)
+                       and not any(str(v.get(k, "")).casefold() == str(row["identifiers"][k]).casefold()
+                                   for v in identifiers) for k in ("isbn", "asin")):
+                    continue
+                id_match = bool(folder_id and str(row["id"]) == folder_id[1])
+                isbn_match = bool(isbn and isbn == isbn_key(row.get("identifiers", {}).get("isbn")))
+                if explicit:
+                    if row["id"] != explicit.get("id") or not row.get("uuid") or row["uuid"] != explicit.get("uuid"):
                         continue
-                if id_match or isbn_match or work_match or library and bound:
-                    matches.append((row, authors))
+                    if bound and (bound["calibre_library"] != library or bound["calibre_uuid"] != row["uuid"]
+                                  or bound["calibre_id"] != row["id"] or bound["identity_digest"] != identity(book)):
+                        raise ValueError("Association contradicts an existing Calibre binding; resolve identity first.")
+                    if not compatible:
+                        continue
+                elif bound:
+                    if (bound["calibre_library"] != library or bound["identity_digest"] != identity(book)
+                            or bound["calibre_id"] != row["id"] or bound["calibre_uuid"] != row.get("uuid")
+                            or not compatible):
+                        continue
+                elif not compatible or not (id_match or isbn_match):
+                    continue
+                if library and (not isinstance(row.get("uuid"), str) or not row["uuid"].strip()
+                                or sum(r.get("uuid") == row["uuid"] for r in catalog) != 1):
+                    continue
+                matches.append((row, authors))
             if len(matches) != 1:
                 continue
             row, authors = matches[0]
+            if library:
+                bindings.append((audit["server"], audit["library"], book.id, identity(book), library, row["id"], row["uuid"]))
             v = {"title": row["title"]}
             if "authors" in row:
                 v["authors"] = authors
@@ -68,18 +103,27 @@ def import_catalog(store, audit_id, text, library=None):
                 v["identifiers"] = {k: v for k, v in row["identifiers"].items() if k in ("isbn", "asin")}
             result[book.id] = {"id": row["id"], "values": v, "raw": row, "imported": captured,
                                "catalog_digest": fingerprint}
+        # Two ABS items cannot silently acquire the same Calibre identity.
+        keys = [(b[4], b[5], b[6]) for b in bindings]
+        ambiguous = {k for k in keys if keys.count(k) > 1}
+        for binding in bindings:
+            if (binding[4], binding[5], binding[6]) in ambiguous:
+                result.pop(binding[2], None)
         with store.connect() as db:
+            db.executemany("INSERT OR REPLACE INTO calibre_bindings VALUES(?,?,?,?,?,?,?)",
+                           [b for b in bindings if b[2] in result])
             db.execute("INSERT OR REPLACE INTO calibre_catalogs VALUES(?,?)", (audit_id, compact(result)))
             db.execute("INSERT INTO calibre_catalog_history(audit_id,imported,data) VALUES(?,?,?)", (audit_id, captured, compact(catalog)))
             audit = store.audit(audit_id)
-            from .persistent_state import identity
             books = {book.id: book for book in store.books(audit_id)}
             rows = db.execute("SELECT * FROM corrections WHERE server=? AND library=? AND status IN ('pending','edited_in_calibre')", (audit["server"], audit["library"])).fetchall()
             for correction in rows:
                 match = result.get(correction["item_id"])
                 book = books.get(correction["item_id"])
-                if (match and book and identity(book, correction["field"]) == correction["identity_digest"]
+                if (library and match and book and identity(book, correction["field"]) == correction["identity_digest"]
                         and (correction["calibre_id"] is None or correction["calibre_id"] == match["id"])
+                        and (not correction["calibre_library"] or correction["calibre_library"] == library)
+                        and (not correction["calibre_uuid"] or correction["calibre_uuid"] == match["raw"].get("uuid"))
                         and correction["field"] in match["values"]
                         and match["values"][correction["field"]] == json.loads(correction["proposed"])):
                     if library:
