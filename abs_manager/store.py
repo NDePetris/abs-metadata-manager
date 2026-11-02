@@ -265,23 +265,23 @@ class Store(PersistentState):
         rows = self.rows("SELECT l.data FROM verification_tasks t JOIN verification_runs r ON r.id=t.run_id "
                          "JOIN verification_lookups l ON l.id=t.lookup_id WHERE r.audit_id=? AND t.item_id=? "
                          "ORDER BY r.id DESC", (audit_id, item_id))
-        if not rows:
-            audit = self.audit(audit_id)
-            book = self.book(audit_id, item_id)
-            from .persistent_state import identity
-            previous = self.rows("SELECT b.raw, b.audit_id FROM books b JOIN audits a ON a.id=b.audit_id "
-                                 "WHERE a.server=? AND a.library=? AND a.status='complete' AND a.id<? "
-                                 "AND b.item_id=? ORDER BY a.id DESC", (audit["server"], audit["library"], audit_id, item_id))
-            for old in previous:
-                prior = Book(json.loads(old["raw"]))
-                if identity(prior) == identity(book) and prior.values == book.values:
-                    rows = self.rows("SELECT l.data FROM verification_tasks t JOIN verification_runs r ON r.id=t.run_id "
-                                     "JOIN verification_lookups l ON l.id=t.lookup_id WHERE r.audit_id=? AND t.item_id=? "
-                                     "ORDER BY r.id DESC", (old["audit_id"], item_id))
-                    if rows:
-                        break
-                else:
-                    break
+        audit = self.audit(audit_id)
+        book = self.book(audit_id, item_id)
+        from .persistent_state import identity
+        known = {json.loads(r["data"])["source"] for r in rows}
+        previous = self.rows("SELECT b.raw,b.audit_id FROM books b JOIN audits a ON a.id=b.audit_id "
+                             "WHERE a.server=? AND a.library=? AND a.status='complete' AND a.id<? AND b.item_id=? ORDER BY a.id DESC",
+                             (audit["server"], audit["library"], audit_id, item_id))
+        for old in previous:
+            prior = Book(json.loads(old["raw"]))
+            if identity(prior) != identity(book) or prior.values != book.values:
+                break
+            captured = self.rows("SELECT l.data FROM verification_tasks t JOIN verification_runs r ON r.id=t.run_id "
+                                 "JOIN verification_lookups l ON l.id=t.lookup_id WHERE r.audit_id=? AND t.item_id=? ORDER BY r.id DESC",
+                                 (old["audit_id"], item_id))
+            missing = [r for r in captured if json.loads(r["data"])["source"] not in known]
+            rows.extend(missing)
+            known.update(json.loads(r["data"])["source"] for r in missing)
         latest = {}
         for row in rows:
             data = json.loads(row["data"])
@@ -344,7 +344,7 @@ class Store(PersistentState):
                                         and current_choice["decision"] == "absent" else None)
             for field, details in report["fields"].items():
                 details["decision"] = report["human_decisions"].get(field)
-            relevant = [d for d in report["fields"].values() if d["status"] != "Not applicable"]
+            relevant = [report["fields"][f] for f in ("title", "subtitle", "authors", "narrators", "series") if report["fields"][f]["status"] != "Not applicable"]
             pending = [d for d in relevant if not (d["decision"] and d["decision"]["valid"]
                        and d["decision"]["decision"] == "confirmed")]
             if any(d["decision"] and d["decision"]["valid"] and d["decision"]["decision"] == "correction_needed" for d in pending):

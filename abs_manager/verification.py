@@ -97,7 +97,13 @@ def candidate(raw: dict, source: str, url: str = "", *, work_only=False) -> dict
     # A provider's search URL and raw response can change between queries. Keep
     # rejection identities stable for the same provider recording.
     identifier = str(v["identifiers"].get("asin", "")).strip().upper()
-    result["id"] = digest({"source": source, "asin": identifier} if re.fullmatch(r"[A-Z0-9]{10}", identifier) else {
+    provider_id = next((str(raw[k]) for k in ("id", "uuid", "recordingId", "productId")
+                        if isinstance(raw.get(k), (str, int)) and str(raw[k]).strip()), None)
+    recording_key = ({"source": source, "title": canon(v["title"]),
+                      "authors": comparable("authors", v["authors"]), "narrators": comparable("narrators", v["narrators"]),
+                      "duration": result["duration"], "language": result["language"], "abridged": result["abridged"]}
+                     if not work_only and v["title"] and v["authors"] and v["narrators"] and result["duration"] else None)
+    result["id"] = digest({"source": source, "asin": identifier} if re.fullmatch(r"[A-Z0-9]{10}", identifier) else {"source": source, "provider_id": provider_id} if provider_id else recording_key if recording_key else {
         "source": source, "values": v, "language": result["language"],
         "duration": result["duration"], "abridged": result["abridged"],
         "publisher": result["publisher"], "published": result["published"], "work_only": work_only})

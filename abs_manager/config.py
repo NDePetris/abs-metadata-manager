@@ -58,9 +58,9 @@ class Settings:
 
 
 def defaults() -> dict:
-    saved = cli_config()
+    saved = {}
     return {"server": os.getenv("ABS_SERVER") or os.getenv("ABS_URL") or saved.get("server") or "",
-            "token": os.getenv("ABS_TOKEN") or saved.get("accessToken") or "",
+            "token": "",
             "executable": detect_cli(os.getenv("ABS_CLI_PATH", "")),
             "library": os.getenv("ABS_LIBRARY") or saved.get("defaultLibrary") or "",
             "interval": float(os.getenv("ABS_MM_INTERVAL", "1.5")),

@@ -118,13 +118,16 @@ def run_audit(store: Store, adapter: Adapter, library: dict, progress: Callable 
         return audit_id
 
 
-def preview(store: Store, audit_id: int) -> dict:
+def preview(store: Store, audit_id: int, selected=None) -> dict:
     audit = store.audit(audit_id)
     latest = store.latest(audit["server"], audit["library"])
     if audit["status"] != "complete" or latest["id"] != audit_id or audit["read_only"]:
         raise SafetyError("Only the latest complete live audiobook audit can produce an apply preview.")
     groups = {}
+    selected = sorted(set(selected)) if selected is not None else None
     for finding in store.findings(audit_id):
+        if selected is not None and finding["id"] not in selected:
+            continue
         if finding["status"] != "approved" or not finding["actionable"]:
             continue
         book = store.book(audit_id, finding["item_id"])
@@ -143,6 +146,10 @@ def preview(store: Store, audit_id: int) -> dict:
         group["payload"] = payload(group["changes"])
     result = {"server": audit["server"], "library": audit["library"], "audit_id": audit_id,
               "books": list(groups.values())}
+    if selected is not None:
+        if set(selected) != {fid for group in groups.values() for fid in group["finding_ids"]}:
+            raise SafetyError("Selected approvals changed.")
+        result["selected"] = selected
     result["digest"] = digest(result)
     return result
 
@@ -183,7 +190,7 @@ class Workflow:
         if phrase != confirmation(plan):
             raise SafetyError("Enter the exact confirmation phrase shown in the preview.")
         with operation_lock(self.store.path):
-            fresh = preview(self.store, plan["audit_id"])
+            fresh = preview(self.store, plan["audit_id"], plan.get("selected"))
             if fresh != plan:
                 raise SafetyError("Approvals or preview changed. Review and confirm the new preview.")
             self._ready(plan["server"], plan["library"])

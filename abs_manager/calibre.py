@@ -10,7 +10,7 @@ from .store import now
 from .verification import isbn_key, names
 
 
-def import_catalog(store, audit_id, text):
+def import_catalog(store, audit_id, text, library=None):
     catalog = json.loads(text)
     if not isinstance(catalog, list) or not all(isinstance(r, dict) and isinstance(r.get("id"), int)
                                               and isinstance(r.get("title"), str) for r in catalog):
@@ -41,7 +41,19 @@ def import_catalog(store, audit_id, text):
                     row["identifiers"]["isbn"])
                 work_match = canon(row["title"]) == canon(book.values["title"] or "") and {
                     canon(a) for a in authors} == {canon(a) for a in book.values["authors"]}
-                if id_match or isbn_match or work_match:
+                if library:
+                    corrections = [r for r in store.corrections(audit_id) if r["item_id"] == book.id]
+                    bound = [r for r in corrections if r["calibre_library"] == library and r["calibre_uuid"]]
+                    titles = {canon(book.values["title"] or "")} | {canon(r["proposed"]) for r in corrections
+                              if r["field"] == "title" and r["accepted"]}
+                    compatible = (canon(row["title"]) in titles and {canon(a) for a in authors} ==
+                                  {canon(a) for a in book.values["authors"]})
+                    if bound:
+                        if not any(r["calibre_uuid"] == row.get("uuid") and r["calibre_id"] == row["id"] for r in bound):
+                            continue
+                    elif not compatible or not row.get("uuid"):
+                        continue
+                if id_match or isbn_match or work_match or library and bound:
                     matches.append((row, authors))
             if len(matches) != 1:
                 continue
@@ -70,6 +82,29 @@ def import_catalog(store, audit_id, text):
                         and (correction["calibre_id"] is None or correction["calibre_id"] == match["id"])
                         and correction["field"] in match["values"]
                         and match["values"][correction["field"]] == json.loads(correction["proposed"])):
+                    if library:
+                        db.execute("UPDATE corrections SET calibre_library=?,calibre_uuid=? WHERE id=?",
+                                   (library, match["raw"].get("uuid"), correction["id"]))
                     db.execute("UPDATE corrections SET status='verified_in_calibre', calibre_id=?, calibre_verified=?, updated=? WHERE id=?",
                                (match["id"], captured, captured, correction["id"]))
     return len(result)
+
+
+def validate_local(store, audit_id, executable, library):
+    """Only invoke the fixed local catalog listing command."""
+    import os
+    import subprocess
+    from pathlib import Path
+    if not library or not Path(library).is_dir():
+        raise ValueError("Configure a local Calibre library folder in Settings.")
+    with operation_lock(store.path):
+        try:
+            result = subprocess.run([executable, "list", "--with-library", str(Path(library).resolve()),
+                                     "--for-machine", "--fields", "title,authors,series,series_index,identifiers,uuid"],
+                                    check=False, capture_output=True, text=True, encoding="utf-8", timeout=60, shell=False,
+                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        except (OSError, subprocess.TimeoutExpired):
+            raise ValueError("Calibre listing unavailable or timed out. No correction was verified.") from None
+        if result.returncode:
+            raise ValueError("Calibre could not list the library. Close Calibre and retry explicitly, or use a catalog export.")
+    return import_catalog(store, audit_id, result.stdout, str(Path(library).resolve()))
