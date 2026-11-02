@@ -9,7 +9,7 @@ From PowerShell in `G:\Projects\abs-metadata-manager`:
 .\start.ps1
 ```
 
-For a fresh checkout, use `.\start.ps1 -Install -InstallCli` once. The launcher binds to `127.0.0.1:8501`. In Settings, use the existing Cloudflare HTTPS server URL and API key. No direct LAN connectivity is required. Credentials remain in session/environment/ignored configuration, never the verification tables. To try the UI without credentials, load the synthetic sample in Library, then select Verification.
+For a fresh checkout, use `.\start.ps1 -Install -InstallCli` once. The launcher binds to `127.0.0.1:8501`. In Settings, use the existing Cloudflare HTTPS server URL and API key. No direct LAN connectivity is required. Credentials remain in session/environment/ignored configuration, never the verification tables. To try the UI without credentials, load the synthetic sample in Import, then select Match & Verify.
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
@@ -23,13 +23,15 @@ Tests use synthetic providers, stored public fixtures, fake adapters, and a loop
 | Status | Meaning |
 | --- | --- |
 | Verified | A uniquely matched external candidate supports the exact field value; provenance identifies the candidate and source. Recording credits additionally require recording identity. |
-| Consistent | Values agree with local evidence, a read-only authoritative Calibre catalog, or a human-selected ambiguous edition. This does not assert independent external verification. |
+| Consistent | Values agree with local evidence, a read-only authoritative Calibre catalog, or a human-selected edition. This does not assert independent external verification. |
 | Conflict | Values or local structural checks disagree. Inspect the evidence; this does not automatically establish that ABS is wrong. |
 | Missing | A required saved value is absent, no saved cover/chapters exist, or an assigned series has no valid position. An intentionally unnumbered edition may need review. |
 | Unverified | Evidence is unavailable, insufficient, or ambiguous. Optional blank subtitles, series, translators, and identifiers are not automatically errors. |
 | Not applicable | Ordinary ebooks have no narrator/audio chapter/tag requirement; standalone books need no series position. |
 
-Human review has a separate date, evidence, outcome, and snapshot digest. Outcomes include Reviewed, Confirmed error, Formatting preference, and Unresolved. They never overwrite external status or approve a correction. Edition selection records its own evidence and date. If several candidates remain plausible, the report retains ambiguity even after a human selects one.
+Human field decisions have their own evidence, source and history. Confirmed correct, needs correction, unable to verify, and review later are separate from independent external status and from write approval. Generic historical review annotations remain available but are not converted into accepted fields. A decision can be reopened deliberately. A new external disagreement remains visible and does not silently revoke acceptance.
+
+An accepted field survives a new completed import only while its server, library, current item identity, relevant edition evidence and value remain compatible. Unrelated metadata changes do not invalidate the field. Changed values or identity evidence reopen review; a changed ID, moved path, or ambiguous replacement is handled conservatively and cannot silently inherit acceptance. Removed items retain history. Rejected candidate identities and their evidence are retained across compatible imports. New imports always expire prior write approvals.
 
 ## Sources and limitations
 
@@ -63,9 +65,11 @@ Queries use ISBN where present, otherwise title/author. Volume identifiers, lang
 
 Each candidate is retained with original JSON, source, source URL, normalized values, query, and capture time. Matching records all positive signals and contradictions. It considers ASIN, checksum-valid ISBN (including ISBN-10/13 equivalence), title with explicit series/Unabridged labels normalized, full contributor sets, language aliases, series name/decimal position, narrators, duration, abridgment, publisher, and release details when supplied.
 
-Title alone never establishes recording identity. A work match requires title plus authors, or an exact identifier, without contradictory identity fields. A recording match additionally needs an audiobook provider and either an exact recording identifier or matching narrators plus duration. Duration tolerance is the larger of one minute or 2%. Contradictory duration, language, identity, or abridgment prevents a recording match. With an exact identifier, differing narrator credits remain a conflict to inspect. No numerical score authorizes any update.
+Title alone never establishes recording identity. A work match requires title plus authors, or an exact identifier, without contradictory identity fields. A recording match additionally needs an audiobook provider and either a valid exact ASIN or matching narrators plus duration. ISBN agreement alone never proves recording identity. Duration tolerance is the larger of one minute or 2%. Contradictory duration, language, identity, or abridgment prevents an independent recording match. No numerical score authorizes any update.
 
-Multiple plausible candidates remain ambiguous/unverified until inspected. A human-selected edition is explicitly labeled and retains ambiguity. A work-level match cannot independently verify narrators, recording-specific series positions, or cover correctness. The algorithm deliberately prefers leaving fields unverified over choosing an edition by result order.
+Candidates show one of five assessments: correct work and recording; correct work with recording uncertain; different recording of the same work; wrong work; or no match found. Use **This is my edition**, **Not my edition**, **Wrong book**, or **Unsure / review later** with evidence. Rejected candidates are hidden from the normal candidate selector; enable **Show rejected candidates** to inspect or reconsider them. Refine title/ASIN and author searches, and filter returned candidates by narrator. If your edition is absent, save a manual edition reference and recording evidence; it remains a human association. A manually selected same-work recording may supply a pending correction even when its credits conflict with saved values, but it never gains independent verification through that selection.
+
+Multiple plausible candidates remain ambiguous/unverified until inspected. Explicit edition decisions retain their evidence; a human association is not itself independent external verification. A work-level match cannot independently verify narrators, recording-specific series positions, or cover correctness. The algorithm deliberately prefers leaving fields unverified over choosing an edition by result order.
 
 ## Local evidence
 
@@ -94,15 +98,15 @@ calibredb list --with-library 'D:\Calibre Library' --for-machine --fields title,
     Set-Content -Encoding utf8 calibre-catalog.json
 ```
 
-The JSON includes numeric record IDs automatically. Upload it through Verification's Calibre catalog form. Export files contain private inventory data: keep them outside Git or under ignored `data/`. See [Calibre list documentation](https://manual.calibre-ebook.com/generated/en/calibredb.html#list).
+The JSON includes numeric record IDs automatically. Upload it through the Calibre catalog form. Export files contain private inventory data: keep them outside Git or under ignored `data/`. See [Calibre list documentation](https://manual.calibre-ebook.com/generated/en/calibredb.html#list).
 
 The importer accepts a single-library JSON array. It matches ebook records through a folder's numeric Calibre ID, valid ISBN, or exact title plus all authors. Ambiguous matches remain unmatched. It records catalog digest, import date, record ID, and values; Calibre comparisons are consistent/conflicting, never mislabeled as independent online verification. No Calibre database, EPUB, or managed folder is opened or edited. Custom translator/subtitle/cover columns are not currently mapped. Without a uniquely matched catalog record, the report displays its ABS/filesystem-only limitation.
 
 ## Pending corrections and safety
 
-A supported discrepancy may be sent to the existing Review workflow only when the candidate establishes a recording match. Ambiguous recordings also require a recorded human edition selection. A new proposal includes source evidence and starts **pending**. Existing proposals for that book/field must be edited or rejected first. Review approval and Apply's exact preview digest, source identity checks, durable journal, unrelated metadata guards, and reconciliation requirements are unchanged.
+A supported discrepancy may be sent to the correction workflow only when the candidate establishes a recording match. Ambiguous recordings also require a recorded human edition selection. A new proposal includes source evidence and starts **pending**. Existing proposals for that book/field must be edited or rejected first. Separate field approval and the exact apply preview digest, source identity checks, durable journal, unrelated metadata guards, and reconciliation requirements are unchanged.
 
-Ebooks remain read-only. Translator, identifier, cover, chapter, and embedded-tag remediation is external/manual. Verification never invokes the remote writer, and there is no automatic correction authority. No production metadata writes were performed during development.
+Ebooks remain read-only. Record the proposed Calibre correction and supporting evidence, then edit it in Calibre yourself. Marking an edit as made is a reminder, not verification: import a later Calibre catalog and check that its uniquely matched record contains the proposed value. A later ABS import provides a separate observation of synchronization. Translator, identifier, cover, chapter, and embedded-tag remediation is external/manual. Verification never invokes the remote writer, and there is no automatic correction authority. No production metadata writes were performed during development.
 
 ## Actual coverage and remaining gaps
 

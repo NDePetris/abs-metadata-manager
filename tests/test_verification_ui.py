@@ -20,14 +20,14 @@ def test_verification_empty_and_sample_render_reruns_no_transport(tmp_path, monk
     monkeypatch.setattr(CliAdapter, "_run", lambda *args, **kwargs: (_ for _ in ()).throw(
         AssertionError("Rendering cannot call transport")))
     at = AppTest.from_file(str(APP), default_timeout=30).run()
-    widget(at, "radio", "Workspace").set_value("Verification").run()
+    widget(at, "radio", "Workspace").set_value("Match & Verify").run()
     assert not at.exception
     assert any("Complete an audit" in i.value for i in at.info)
-    widget(at, "radio", "Workspace").set_value("Library").run()
+    widget(at, "radio", "Workspace").set_value("Import").run()
     widget(at, "button", "Load read-only sample library").click().run()
-    widget(at, "radio", "Workspace").set_value("Verification").run()
+    widget(at, "radio", "Workspace").set_value("Match & Verify").run()
     assert not at.exception
-    assert len(at.dataframe[2].value) == 6  # matrix includes all sample books
+    assert any(len(frame.value) == 6 and "Ambiguous" in frame.value.columns for frame in at.dataframe)  # matrix includes all sample books
     widget(at, "text_input", "Search quality report").set_value("no-such-title").run()
     assert any("No books match" in i.value for i in at.info)
     assert not at.exception
@@ -55,7 +55,7 @@ def test_lookup_explicit_submit_resume_and_reruns(setup, monkeypatch):
     at = AppTest.from_file(str(APP), default_timeout=30)
     at.session_state["adapter"] = api
     at.run()
-    widget(at, "radio", "Workspace").set_value("Verification").run()
+    widget(at, "radio", "Workspace").set_value("Match & Verify").run()
     widget(at, "button", "Discover server metadata providers").click().run()
     assert not at.exception
     widget(at, "multiselect", "Books for lookup").set_value(["current-id"])
@@ -66,13 +66,13 @@ def test_lookup_explicit_submit_resume_and_reruns(setup, monkeypatch):
     assert len(requests) == 1
     assert any("recording" in w.value for w in at.markdown)
     widget(at, "text_input", "Edition selection evidence").set_value("Same recording runtime and credits")
-    widget(at, "button", "Record human edition selection").click().run()
+    widget(at, "button", "This is my edition").click().run()
     for _ in range(2):
         at.run()
         assert not at.exception
     assert len(requests) == 1
     assert not api.writes
-    assert store.verification_annotations(aid, "current-id")["edition"]["date"]
+    assert any(d["decision"] == "selected" for d in store.candidate_decisions(aid, "current-id").values())
 
 
 def test_cancel_run_ui_and_export_render_do_not_fetch(setup, monkeypatch):
@@ -84,7 +84,7 @@ def test_cancel_run_ui_and_export_render_do_not_fetch(setup, monkeypatch):
     at = AppTest.from_file(str(APP), default_timeout=30)
     at.session_state["adapter"] = api
     at.run()
-    widget(at, "radio", "Workspace").set_value("Verification").run()
+    widget(at, "radio", "Workspace").set_value("Match & Verify").run()
     widget(at, "button", "Cancel pending lookups").click().run()
     assert not at.exception
     assert store.verification_runs(aid)[0]["id"] == rid
@@ -108,7 +108,7 @@ def test_verification_ebook_never_enables_corrections(setup, monkeypatch):
     run_verification(store, rid, source)
     monkeypatch.setenv("ABS_MM_DB", store.path)
     at = AppTest.from_file(str(APP), default_timeout=30).run()
-    widget(at, "radio", "Workspace").set_value("Verification").run()
+    widget(at, "radio", "Workspace").set_value("Match & Verify").run()
     widget(at, "selectbox", "Inspect verification book").set_value("ebook").run()
     assert not at.exception
-    assert widget(at, "button", "Create pending correction in Review").disabled
+    assert widget(at, "button", "Create pending correction in Resolve").disabled

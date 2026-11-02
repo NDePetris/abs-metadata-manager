@@ -12,7 +12,8 @@ from abs_manager.adapter import AdapterError, CliAdapter
 from abs_manager.audit import analyze
 from abs_manager.config import ROOT, Settings, defaults
 from abs_manager.locking import BusyError, operation_lock
-from abs_manager.models import FIELDS, compact
+from abs_manager.models import FIELDS, compact, digest
+from abs_manager.resolution_ui import correction_queue, persistent_history, resolution_view
 from abs_manager.sample import sample_audit
 from abs_manager.store import Store
 from abs_manager.verification_ui import verification_view
@@ -73,7 +74,7 @@ def audit_action(store, adapter, library, resume_id=None):
         # Render persisted progress and its diagnostic below, including after another rerun.
         return
     st.session_state["snapshot_choice"] = aid
-    flash("Audit complete. Proposals remain pending until you explicitly approve fields in Review.")
+    flash("Import complete. Valid field acceptance is retained; correction write approvals start fresh.")
 
 
 def settings_view(store):
@@ -162,7 +163,7 @@ def choose_snapshot(store):
                                                  for a in audits if a["id"] == i))
     audit = store.audit(aid)
     if audit["read_only"]:
-        st.info("Offline snapshot · read-only. Approval and Apply require a fresh live audiobook audit.")
+        st.info("Offline snapshot · read-only. Write approval and Update Sources require a fresh live audiobook audit.")
     elif audit["status"] != "complete":
         st.warning("This audit is incomplete. Saved progress is retained. Resume after validation or start a fresh audit; approvals and writes are disabled.")
     st.caption(f"Source: {audit['server']} · Library ID: {audit['library']}")
@@ -170,15 +171,15 @@ def choose_snapshot(store):
 
 
 def library_view(store):
-    st.title("Library")
-    st.write("Audit the whole library, then review each proposed field correction.")
+    st.title("Import")
+    st.write("Import saved Audiobookshelf metadata into a local audit snapshot. External catalog searches are a separate step in Match & Verify.")
     adapter, library = st.session_state.get("adapter"), st.session_state.get("library")
     if adapter and library:
         st.write(f"**Connected:** {adapter.server} / {library['name']}")
         if st.button("Audit whole library", type="primary"):
             with st.spinner("Reading pages and expanded items, one call at a time…"):
                 audit_action(store, adapter, library)
-        st.caption("New audits expire prior approvals. Resume continues the same incomplete snapshot and pending decisions. "
+        st.caption("New imports expire write approvals and preserve valid field acceptance. Resume continues the same incomplete snapshot. "
                    "Use Streamlit’s Stop control to interrupt; incomplete audits cannot be approved or applied.")
     else:
         st.info("Open Settings to connect and select your audiobook library.")
@@ -192,6 +193,29 @@ def library_view(store):
             flash("Loaded six synthetic examples. No server connection or metadata writes.")
         return
     books = store.books(audit["id"])
+    if audit["status"] == "complete":
+        summary = store.import_summary(audit["id"])
+        st.subheader("Import comparison")
+        st.write(f"{summary['new']} new · {summary['removed']} removed · {summary['changed']} changed · "
+                 f"{summary['ambiguous']} identities need review · {summary['retained']} accepted fields retained · "
+                 f"{summary['reopened']} fields awaiting reacceptance · {summary['unresolved']} books awaiting review")
+        st.caption("Removed books keep their archived evidence. Changed IDs and paths never inherit acceptance silently.")
+        with st.expander("New, changed, and removed inventory"):
+            previous = store.rows("SELECT id FROM audits WHERE server=? AND library=? AND status='complete' "
+                                  "AND id<? ORDER BY id DESC LIMIT 1",
+                                  (audit["server"], audit["library"], audit["id"]))
+            prior = {b.id: b for b in store.books(previous[0]["id"])} if previous else {}
+            current = {b.id: b for b in books}
+            changes = [{"Change": "New" if b.id not in prior else "Changed", "Book": b.values["title"],
+                        "Item ID": b.id, "Path": b.raw.get("relPath") or b.raw.get("path")}
+                       for b in books if b.id not in prior or digest(b.raw) != digest(prior[b.id].raw)]
+            changes += [{"Change": "Removed · history retained", "Book": b.values["title"], "Item ID": b.id,
+                         "Path": b.raw.get("relPath") or b.raw.get("path")} for b in prior.values()
+                        if b.id not in current]
+            if changes:
+                st.dataframe(changes, hide_index=True, width="stretch")
+            else:
+                st.caption("No inventory changes since the prior completed import.")
     st.caption(f"Saved progress: {len(books)} / {audit['expected'] if audit['expected'] is not None else '?'} books")
     if audit["error"]:
         st.error(f"Latest audit error: {audit['error']}")
@@ -258,12 +282,11 @@ def library_view(store):
             st.caption("No cover found.")
 
 
-def review_view(store):
-    st.title("Review")
-    st.write("Confidence is advisory. Only your explicit approval adds a field to Apply.")
-    audit = choose_snapshot(store)
+def review_view(store, audit=None):
+    st.write("Inspect audiobook correction proposals. Only explicit field approval adds a correction to Update Sources.")
+    audit = audit or choose_snapshot(store)
     if audit is None:
-        st.info("Run an audit from Library to start reviewing.")
+        st.info("Run an audit from Import to start reviewing.")
         return
     aid = audit["id"]
     findings = store.findings(aid)
@@ -291,7 +314,7 @@ def review_view(store):
         c1, c2 = st.columns(2)
         if c1.button("Approve selected fields", disabled=not selected or not can_review):
             store.review(selected, "approved")
-            flash(f"Approved {len(selected)} explicitly selected fields. Open Apply to preview.")
+            flash(f"Approved {len(selected)} explicitly selected fields. Open Update Sources to preview.")
         if c2.button("Reject selected fields", disabled=not selected or not can_review):
             store.review(selected, "rejected")
             flash(f"Rejected {len(selected)} selected fields.")
@@ -354,18 +377,17 @@ def show_plan(plan):
             st.json(group["payload"])
 
 
-def apply_view(store):
-    st.title("Apply")
+def apply_view(store, audit=None):
     st.write("Preview approved changes, then confirm this exact batch. Live values are revalidated before each write.")
-    audit = choose_snapshot(store)
+    audit = audit or choose_snapshot(store)
     if audit is None:
-        st.info("Run an audit and approve fields in Review first.")
+        st.info("Run an audit and approve fields in Resolve first.")
         return
     if audit["read_only"] or audit["status"] != "complete":
         return
     plan = preview(store, audit["id"])
     if not plan["books"]:
-        st.info("No approved fields are pending. Open Review to approve specific corrections.")
+        st.info("No approved fields are pending. Open Resolve to approve specific corrections.")
         return
     count = sum(len(b["changes"]) for b in plan["books"])
     st.subheader(f"Dry run · {count} fields across {len(plan['books'])} books")
@@ -377,7 +399,7 @@ def apply_view(store):
                  and selected_library.get("id") == plan["library"])
     blocked = store.unresolved(plan["server"])
     if blocked:
-        st.warning("Unresolved History entries block writes. Reconcile them first.")
+        st.warning("Unresolved journal entries block writes. Reconcile them first.")
     if not connected:
         st.info("Connect to this snapshot’s source server and select its library in Settings before applying.")
     expected = confirmation(plan)
@@ -392,12 +414,13 @@ def apply_view(store):
             st.error("Select the explicit write confirmation checkbox.")
             return
         ids = Workflow(store, adapter).apply(plan, phrase, progress_bar())
-        flash(f"Verified {len(ids)} book updates. Results and guarded rollback are available in History.")
+        flash(f"Verified {len(ids)} book updates. Results and guarded rollback are available in Reconcile & History.")
 
 
 def history_view(store):
-    st.title("History")
+    st.title("Reconcile & History")
     st.write("Inspect durable intent and observed results. Reconciliation only reads the server; rollback requires confirmation.")
+    persistent_history(store)
     rows = store.history()
     if not rows:
         st.info("No updates have been submitted. Verified, skipped, failed, and uncertain operations appear here.")
@@ -449,26 +472,53 @@ def history_view(store):
                 flash("Rollback verified. Start a fresh audit before proposing further corrections.")
 
 
+def resolve_view(store):
+    st.title("Resolve")
+    st.write("Review saved fields, preserve acceptance, and prepare only the corrections you need.")
+    audit = choose_snapshot(store)
+    if audit is None:
+        st.info("Import a library first. Match editions for external evidence, or record your own field evidence here.")
+        return
+    metadata, proposals = st.tabs(["Review saved metadata", "Approve audiobook corrections"])
+    with metadata:
+        resolution_view(store, audit)
+    with proposals:
+        review_view(store, audit)
+
+
+def update_sources_view(store):
+    st.title("Update Sources")
+    audit = choose_snapshot(store)
+    if audit is None:
+        st.info("Import a library and prepare corrections in Resolve first.")
+        return
+    audio, manual = st.tabs(["Audiobookshelf approved batch", "Calibre & manual corrections"])
+    with audio:
+        apply_view(store, audit)
+    with manual:
+        correction_queue(store, audit)
+
+
 def main():
     store = Store(os.getenv("ABS_MM_DB", str(ROOT / "data" / "metadata.sqlite3")))
     with st.sidebar:
         st.header("Metadata Manager")
-        page = st.radio("Workspace", ["Library", "Verification", "Review", "Apply", "History", "Settings"])
+        page = st.radio("Workspace", ["Import", "Match & Verify", "Resolve", "Update Sources", "Reconcile & History", "Settings"])
         adapter = st.session_state.get("adapter")
         st.caption(f"Connected · {adapter.server}" if adapter else "Local workspace · disconnected")
         st.divider()
-        st.caption("Audit → Review → Preview → Confirm → Verify")
+        st.caption("Import → Match → Resolve → Update Sources → Reimport")
     if message := st.session_state.pop("flash", None):
         st.success(message)
-    views = {"Library": library_view, "Verification": lambda s: verification_view(s, choose_snapshot),
-             "Review": review_view, "Apply": apply_view,
-             "History": history_view, "Settings": settings_view}
+    views = {"Import": library_view, "Match & Verify": lambda s: verification_view(s, choose_snapshot),
+             "Resolve": resolve_view, "Update Sources": update_sources_view,
+             "Reconcile & History": history_view, "Settings": settings_view}
     try:
         views[page](store)
     except (AdapterError, SafetyError, BusyError, ValueError, KeyError) as exc:
         st.error(str(exc))
-        st.caption("Read-only transient requests use up to three attempts. Resume interrupted audits from Library; "
-                   "start fresh if the library changed. Uncertain writes require reconciliation in History and are never retried automatically.")
+        st.caption("Read-only transient requests use up to three attempts. Resume interrupted audits from Import; "
+                   "start fresh if the library changed. Uncertain writes require reconciliation in Reconcile & History and are never retried automatically.")
 
 
 if __name__ == "__main__":

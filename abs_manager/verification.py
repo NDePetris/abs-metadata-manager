@@ -94,7 +94,13 @@ def candidate(raw: dict, source: str, url: str = "", *, work_only=False) -> dict
               "abridged": raw.get("abridged"), "publisher": raw.get("publisher"),
               "published": raw.get("publishedDate", raw.get("publishedYear")),
               "cover": raw.get("cover"), "work_only": work_only, "raw": raw}
-    result["id"] = digest(result)
+    # A provider's search URL and raw response can change between queries. Keep
+    # rejection identities stable for the same provider recording.
+    identifier = str(v["identifiers"].get("asin", "")).strip().upper()
+    result["id"] = digest({"source": source, "asin": identifier} if re.fullmatch(r"[A-Z0-9]{10}", identifier) else {
+        "source": source, "values": v, "language": result["language"],
+        "duration": result["duration"], "abridged": result["abridged"],
+        "publisher": result["publisher"], "published": result["published"], "work_only": work_only})
     return result
 
 
@@ -112,8 +118,14 @@ def match(book: Book, item: dict) -> dict:
     for key in ("asin", "isbn"):
         a, b = saved["identifiers"].get(key), other.get("identifiers", {}).get(key)
         if a and b:
-            equal = (bool(isbn_key(a)) and isbn_key(a) == isbn_key(b) if key == "isbn" else
-                     bool(re.fullmatch(r"[A-Z0-9]{10}", str(a).upper())) and str(a).upper() == str(b).upper())
+            a, b = ((isbn_key(a), isbn_key(b)) if key == "isbn" else
+                    (str(a).strip().upper(), str(b).strip().upper()))
+            if key == "asin" and not (re.fullmatch(r"[A-Z0-9]{10}", a) and
+                                      re.fullmatch(r"[A-Z0-9]{10}", b)):
+                continue
+            if not a or not b:
+                continue
+            equal = a == b
             (signals if equal else contradictions).append(key)
             if equal:
                 exact_ids.append(key)
@@ -137,13 +149,16 @@ def match(book: Book, item: dict) -> dict:
             (signals if canon(str(a)) == canon(str(b)) else contradictions).append(field)
     # ISBNs from work-level aggregations never identify a particular recording.
     work = ("title" in signals and "authors" in signals) or bool(exact_ids)
-    identity_conflicts = {"title", "authors", "asin", "isbn", "language", "abridgment"} & set(contradictions)
-    recording = (book.is_audio and not item.get("work_only") and work and not identity_conflicts
-                 and (bool(exact_ids) or {"narrators", "duration"} <= set(signals))
-                 and not {"duration"} & set(contradictions)
-                 and (bool(exact_ids) or "narrators" not in contradictions))
+    wrong_work = not work or bool({"title", "authors"} & set(contradictions))
+    recording_conflicts = {"asin", "narrators", "duration", "abridgment", "language"} & set(contradictions)
+    recording = (book.is_audio and not item.get("work_only") and not wrong_work and not recording_conflicts
+                 and ("asin" in exact_ids or {"narrators", "duration"} <= set(signals)))
+    classification = ("wrong_work" if wrong_work else "correct_recording" if recording else
+                      "different_recording" if book.is_audio and not item.get("work_only") and recording_conflicts
+                      else "recording_uncertain")
     return {"candidate_id": item["id"], "signals": signals, "contradictions": contradictions,
-            "level": "recording" if recording else "work" if work and not identity_conflicts else "unmatched"}
+            "classification": classification,
+            "level": "recording" if recording else "work" if not wrong_work else "unmatched"}
 
 
 def chapter_assessment(book: Book) -> tuple[str, str]:
@@ -178,7 +193,7 @@ def chapter_assessment(book: Book) -> tuple[str, str]:
 
 
 def assess(book: Book, evidence: list[dict] = (), *, selected: str | None = None,
-           reviews: dict | None = None, calibre: dict | None = None) -> dict:
+           reviews: dict | None = None, calibre: dict | None = None, rejected=()) -> dict:
     saved = values(book)
     _, findings = analyze(book)
     folder = folder_evidence(book.raw.get("relPath") or book.raw["path"])
@@ -187,10 +202,14 @@ def assess(book: Book, evidence: list[dict] = (), *, selected: str | None = None
         folder["limitation"] = "Calibre names may be truncated/sanitized; folders cannot prove a conflict."
     usable = [lookup.get("previous_success", lookup) if lookup.get("state") == "unavailable" else lookup
               for lookup in evidence]
-    candidates = [c for lookup in usable if lookup.get("state") == "ok" for c in lookup.get("candidates", [])]
-    matches = [{**match(book, c), "candidate": c} for c in candidates]
-    plausible = [m for m in matches if m["level"] != "unmatched"]
-    chosen = next((m for m in plausible if m["candidate_id"] == selected), None)
+    candidates = list({c["id"]: c for lookup in usable if lookup.get("state") == "ok"
+                       for c in lookup.get("candidates", [])}.values())
+    rejected = set(rejected)
+    matches = [{**match(book, c), "candidate": c, "rejected": c["id"] in rejected} for c in candidates]
+    plausible = [m for m in matches if m["level"] != "unmatched" and not m["rejected"]
+                 and m["classification"] != "different_recording"]
+    chosen = next((m for m in matches if m["candidate_id"] == selected and not m["rejected"]
+                   and m["classification"] != "wrong_work"), None)
     # Human edition selection is recorded separately and never suppresses ambiguity automatically.
     automatic = plausible[0] if len(plausible) == 1 else None
     external = chosen or automatic
@@ -250,12 +269,13 @@ def assess(book: Book, evidence: list[dict] = (), *, selected: str | None = None
                                                for lookup in usable if any(c["id"] == external["candidate_id"]
                                                                            for c in lookup.get("candidates", []))]})
                 equal = comparable(field, value) == comparable(field, other)
-                recording_field = field in ("narrators", "series_position") and book.is_audio
-                if not recording_field or external["level"] == "recording":
-                    status = ("Consistent" if chosen and len(plausible) > 1 else "Verified") if equal else "Conflict"
+                recording_field = field in ("subtitle", "narrators", "translators", "series_position", "identifiers") and book.is_audio
+                human_recording = chosen and not external["candidate"].get("work_only")
+                if not recording_field or external["level"] == "recording" or human_recording:
+                    status = ("Consistent" if chosen else "Verified") if equal else "Conflict"
                     reason = "External evidence agrees." if equal else "External candidate differs; discrepancy requires review."
-                    if chosen and len(plausible) > 1:
-                        reason += " Human-selected edition; automatic ambiguity remains."
+                    if chosen:
+                        reason += " Human-selected edition; selection is not independent recording verification."
         if len(plausible) > 1 and not chosen and status not in ("Not applicable", "Missing"):
             status, reason = "Unverified", "Ambiguous: multiple plausible editions/candidates; inspect and select an edition."
         if calibre and not book.is_audio and field in calibre["values"]:
@@ -269,6 +289,9 @@ def assess(book: Book, evidence: list[dict] = (), *, selected: str | None = None
     return {"item_id": book.id, "identity": book.identity, "type": "audiobook" if book.is_audio else "ebook",
             "fields": fields, "folder": folder, "lookups": list(evidence), "matches": matches,
             "ambiguous": len(plausible) > 1, "selected_candidate": selected,
+            "match_classification": external["classification"] if external else
+            ("no_match" if not any(not m["rejected"] for m in matches) else "different_recording" if any(
+                m["classification"] == "different_recording" and not m["rejected"] for m in matches) else "wrong_work"),
             "edition_review": (reviews or {}).get("edition"),
             "calibre_limitation": None if book.is_audio or calibre else
             "Calibre catalog unavailable/unmatched: limited to Audiobookshelf and filesystem evidence."}

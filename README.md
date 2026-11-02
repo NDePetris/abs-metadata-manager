@@ -31,6 +31,12 @@ Check the launcher without starting a server with `.\start.ps1 -Check`; choose a
 
 For non-Windows Python environments, install with `python -m pip install -e '.[dev]'`, install the official abs-cli 1.2.0 for your OS, and run `python -m streamlit run app.py --server.address 127.0.0.1`. The Windows launcher and binary are the tested platform.
 
+## Existing database and migration
+
+Stop the app and back up your existing SQLite database before starting the updated version. Its default is `data/metadata.sqlite3`; if `ABS_MM_DB` is set, back up that database instead. Keep the backup private. Start the app with the same database path: schema changes are additive, and existing snapshots, annotations, provider evidence, write journal, and rollback history are retained. Existing generic reviews are not converted to field acceptance. Select your original server and library in Settings and inspect a completed historical snapshot, or start a new import to establish current inventory. A fresh import expires old write approvals; retained field decisions do not approve writes.
+
+If an old interrupted audit has no membership checkpoint, its history is still available but it cannot be resumed safely; start a fresh import. Do not delete or reset the database to resolve an interrupted operation.
+
 ## Connect
 
 Open **Settings** and enter your server URL, API key, and optional executable path. Select **Connect & check compatibility**, then select the audiobook library. The app shows the CLI version, server version, available libraries, and compatibility warnings. Credentials entered here remain in session memory.
@@ -43,14 +49,15 @@ Only CLI version 1.2.0 is currently enabled for writes. Its declared tested ABS 
 
 ## Everyday workflow
 
-1. **Library:** choose **Audit whole library**. All pages and expanded book records are fetched sequentially, with a default 1.5 seconds between CLI calls. Allow a few minutes for 110 books. Progress appears during the operation. This is an audit, not an ABS filesystem scan. Search the results and inspect full observed JSON, normalized evidence, chapter names, and covers. Cover previews load only when explicitly requested.
-2. **Review:** filter by field, confidence, and decision. Inspect the full current and proposed values, reason, folder evidence, and embedded tags exposed by ABS. Approve, reject, or edit a field and save its decision. Bulk approval acts only on the proposal IDs you deliberately select; no rows are preselected. For missing credits or a real subtitle, use **Create a manual field proposal**, then approve it separately. Contributor and series edits use JSON arrays, preserving multiple people and series.
-3. **Apply:** inspect the exact before/after fields and CLI JSON payload for every book. Enter the batch-specific confirmation phrase, tick the explicit write checkbox, and press **Apply confirmed changes**. Live identity and all primary source values are revalidated before each book; approved fields are combined into one update per book. The app stops at the first unsafe or uncertain result.
-4. **History:** inspect successful, skipped, failed, uncertain, and reverted operations. Reconciliation reads live metadata without resubmitting anything. Select a verified book operation to preview and explicitly confirm its guarded rollback.
+1. **Import:** connect in Settings and select a library, then import its ABS inventory. Import reads the saved server metadata; it does not search external catalogs or scan files. Review the import summary, including additions, removals, and changes. Resume an interrupted import when its checkpoint allows it.
+2. **Match & Verify:** explicitly discover the server's providers, then search for a book and compare candidates. Check recording identifiers, narrators, duration, language and abridgment as well as title and author. Reject wrong recordings and record evidence for your edition. A work match alone does not establish recording identity; a catalog may not contain your edition.
+3. **Resolve:** inspect saved values, candidate evidence, and existing decisions. Confirm fields that are correct, mark fields needing correction, or leave them unresolved. Human confirmation is a separate record from independent external verification and is never permission to write.
+4. **Update Sources:** for audiobook fields supported by the writer, prepare and individually approve corrections, inspect the exact batch preview, and explicitly confirm the write. For ebooks, edit the authoritative Calibre library yourself and import a fresh Calibre catalog for comparison. Covers, chapters, embedded tags, files, and other unsupported fields require manual action.
+5. **Reconcile & History:** inspect the durable write journal and reconcile interrupted or uncertain operations using read-only live checks. Import the library again after source changes and review changed or unresolved fields. A claim that a Calibre edit was made does not itself verify the edit; check it against a subsequent catalog import and separately inspect ABS after synchronization.
 
-Decisions and history survive app restarts. A new audit resets prior approvals, even if suggestions look identical. A partial or interrupted new audit disables applying the previous snapshot. Historical snapshots remain available for inspection. Already applied decisions are consumed; rollback never silently reapproves them.
+A saved field acceptance can persist across imports when the same server, library, item identity, edition evidence and field value remain compatible. A changed value or materially changed identity reopens review; ambiguous moves or new IDs do not silently inherit acceptance. Disagreement from a newly queried catalog is retained as evidence rather than automatically revoking human acceptance. Existing generic review annotations are history, not field acceptance. New imports expire previous production write approvals even when the same human acceptance persists. Historical snapshots and journal entries remain available.
 
-If an audit is interrupted with Streamlit's Stop control, its partial snapshot is retained and cannot authorize writes. A process crash may leave it labelled `running`; **Resume audit** also handles that state once the process lock is released. A write interrupted while the CLI is running remains prepared/applied/uncertain and must be reconciled before further writes. Never delete the database to bypass recovery checks.
+A partial or interrupted import cannot authorize writes. A crash may leave it labelled `running`; resume it once the process lock is released. A write interrupted while the CLI is running remains prepared/applied/uncertain and must be reconciled before further writes. Never delete the database to bypass recovery checks.
 
 ## Interrupted read-only audits
 
@@ -62,7 +69,7 @@ To resume an audit created by this version:
 
 1. Restart with `.\start.ps1` if necessary, keeping the same SQLite database (`ABS_MM_DB`).
 2. In **Settings**, connect using the same Cloudflare server URL and select the same library. The app never switches libraries automatically. A library name suggesting ebooks, or a snapshot containing mostly ebooks, displays a warning; ebooks remain read-only.
-3. In **Library → Audit snapshot**, select the latest interrupted (or abandoned `running`) audit for that library. Check **Saved progress** and **Latest audit error**.
+3. In **Import → Audit snapshot**, select the latest interrupted (or abandoned `running`) audit for that library. Check **Saved progress** and **Latest audit error**.
 4. Choose **Resume audit**. The app re-enumerates all library pages, compares the complete ID/identity/path manifest and library folders with the saved checkpoint, and validates every saved book before reuse. Validated saved books skip expanded `items get` calls. The same snapshot and pending findings continue without duplicating books or expiring decisions again. A new **Audit whole library** instead creates a separate snapshot and expires prior approvals.
 5. If another request exhausts retries, repeat Resume later. Progress and request timings survive app restarts. Changed membership, identity, or paths refuse resumption and require a new audit; the reason stays visible. Only the latest complete snapshot can authorize approvals or writes, after every expected book is saved and a final membership check succeeds.
 
@@ -76,7 +83,7 @@ Rotating diagnostics live at `data/audit.log` by default (1 MB each, current fil
 
 Each write commits a FULL-synchronous SQLite journal entry containing the live pre-update item, identity, expected before/after values, exact payload, and proposal IDs **before** invoking the CLI. States are `prepared → applied → verified`; exceptions or failed verification become `uncertain`. A crash can leave either earlier state; both block new writes just like uncertain entries.
 
-In **History**, choose **Reconcile using live metadata (read-only)**:
+In **Reconcile & History**, choose **Reconcile using live metadata (read-only)**:
 
 - Matching intended values and unchanged unrelated metadata become `verified`.
 - Matching the original state becomes `not_applied`. Proposals return to pending; any retry requires deliberate approval and a new confirmation.
@@ -90,11 +97,11 @@ The deterministic audit separates observed JSON, analytical normalized values, a
 
 Rules cover explicit series-number title suffixes/prefixes, terminal `(Unabridged)` labels, decimal positions, Dresden Files spelling, Sarah J. Maas initials, and corroborated Harry Potter role inversions. A conflicting existing series position or narrator credit is retained for investigation. Legitimate subtitles and punctuation survive. Generic chapter labels are informational. Two recordings with the same title remain separate items.
 
-Only `title`, `subtitle`, `authors`, `narrators`, and `series` are writable. The app never calls bulk-update, chapter, cover-mutation, file, embed-metadata, rename, or scan endpoints. Covers, chapters, tags, other metadata, and media structures are checked after each write. Playback progress is omitted from updates; user progress is not fetched or compared because it may change while listening. No M4B/EPUB is opened for writing. No AI is invoked. Independent online lookups run only through explicit actions in Verification and cannot approve or apply changes.
+Only `title`, `subtitle`, `authors`, `narrators`, and `series` are writable. The app never calls bulk-update, chapter, cover-mutation, file, embed-metadata, rename, or scan endpoints. Covers, chapters, tags, other metadata, and media structures are checked after each write. Playback progress is omitted from updates; user progress is not fetched or compared because it may change while listening. No M4B/EPUB is opened for writing. No AI is invoked. Independent online lookups run only through explicit actions in Match & Verify and cannot approve or apply changes.
 
 Ebooks may be inventoried alongside audiobooks or in a selected book library; applying ebook corrections is refused. **Calibre remains authoritative.** There is no Calibre or filesystem synchronization.
 
-Read-only v2.1 audit imports and JSON/CSV finding exports are available. An imported ID can never authorize a live write; start a fresh live audit. The previous project's approvals and journal are never imported. You can load six synthetic read-only examples without credentials from the empty Library view.
+Read-only v2.1 audit imports and JSON/CSV finding exports are available. An imported ID can never authorize a live write; start a fresh live audit. The previous project's approvals and journal are never imported. You can load six synthetic read-only examples without credentials from the empty Import view.
 
 ## Development and testing
 
@@ -115,7 +122,7 @@ See [validation results](docs/VALIDATION.md), [live checklist](docs/LIVE_VALIDAT
 - ABS has no atomic compare-and-swap for these metadata updates. The app reads immediately before writing and verifies immediately after. Avoid editing the same records elsewhere during a batch. Unexpected changes stop the batch.
 - Pagination rejects duplicate IDs, changing totals, and incomplete results. Same-count concurrent library replacement cannot be detected perfectly; run audits while imports and folder moves are idle. Write-time checks still reject stale identities and source values.
 - Missing/ambiguous metadata requires your own edition evidence. Only cached embedded tags exposed by ABS are inspected; the app does not probe audio files. Malformed or incomplete expanded schemas fail closed.
-- Unrelated media changes (including changed cached tags or chapter structure) can conservatively leave an operation uncertain. Resolve in History; there is no unsafe override.
+- Unrelated media changes (including changed cached tags or chapter structure) can conservatively leave an operation uncertain. Resolve in Reconcile & History; there is no unsafe override.
 - The UI is designed for desktop. Wide tables scroll horizontally; the field inspector and exact payload expose full values.
 
 ## Upstream references
@@ -124,12 +131,6 @@ Adapter commands and shapes were checked against [abs-cli v1.2.0](https://github
 
 ## Full-library verification
 
-Open **Verification** and select a completed audit snapshot. Every book appears, including books with no audit findings. The workspace contains field coverage, a searchable status matrix, embedded/folder evidence, candidate comparisons, source links, manual review evidence, and complete JSON/CSV downloads. Downloads always include all books regardless of filters. Existing snapshots can be assessed offline without a new server request.
+Completed snapshots can be inspected offline. External evidence is fetched only through explicit provider discovery and lookup actions. Server provider availability and catalog fields vary; search requests disclose the selected title, author, or identifiers to the provider. Responses and their source evidence are retained locally. Cached results can be reused; refresh is deliberate. See the [verification guide](docs/VERIFICATION.md) for matching, provider limits, and the read-only Calibre catalog export.
 
-For online evidence, connect in Settings to the snapshot's original Cloudflare server URL. Expand **Independent online lookups**, select **Discover server metadata providers**, choose one of the returned IDs (Audible/Audnexus are prioritized), select one book, selected books, or all audiobooks, then **Prepare online verification run**. Preparation is local; **Start / resume read-only lookups** performs sequential searches. Increase **Maximum books this action** to 110 to process an entire audiobook collection in one action, or use the default 10 for frequent pause opportunities. Progress and each response are persisted. Cancel affects pending requests at the next book boundary; an in-flight request may finish. Streamlit Stop/interruption retains already saved responses. Resume never re-queries attached completed records. Failed records require the explicit retry checkbox; a provider outage pauses the remaining queue.
-
-Open Library supports targeted, human-initiated single-book searches only. Google Books is optional and requires `GOOGLE_BOOKS_API_KEY` in your ignored `.env`; routine operation needs no AI account or paid service. Queries disclose the selected book's title/author or available identifiers to the source. Responses are cached with source, query, timestamp, and raw evidence. They stay available offline; refresh is an explicit action. Source selection and known limitations are documented in [Verification guide](docs/VERIFICATION.md).
-
-Human review dates, evidence, and outcomes (including confirmed error versus formatting preference) are independent of the external status. Selecting a plausible edition does not turn ambiguity into automatic external verification. A supported, corroborated recording discrepancy can become a **pending** proposal through **Create pending correction in Review**. Review approval and exact Apply confirmation remain mandatory. Ebooks and unsupported fields remain read-only.
-
-Calibre catalog input accepts a JSON file created on your Calibre machine using the read-only `calibredb list --for-machine --fields title,authors,series,series_index,identifiers` command. See the guide for an exact PowerShell export command. The app never opens Calibre's database or modifies managed folders/EPUBs. Without a unique catalog match, ebook assessment explicitly states its limited coverage.
+Human acceptance, independent external verification, correction proposals, and write approvals are distinct. A selected candidate or a catalog disagreement never authorizes a remote change. Only the current complete live audiobook snapshot can supply separately approved proposals for an explicitly confirmed write.

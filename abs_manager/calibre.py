@@ -58,4 +58,18 @@ def import_catalog(store, audit_id, text):
                                "catalog_digest": fingerprint}
         with store.connect() as db:
             db.execute("INSERT OR REPLACE INTO calibre_catalogs VALUES(?,?)", (audit_id, compact(result)))
+            db.execute("INSERT INTO calibre_catalog_history(audit_id,imported,data) VALUES(?,?,?)", (audit_id, captured, compact(catalog)))
+            audit = store.audit(audit_id)
+            from .persistent_state import identity
+            books = {book.id: book for book in store.books(audit_id)}
+            rows = db.execute("SELECT * FROM corrections WHERE server=? AND library=? AND status IN ('pending','edited_in_calibre')", (audit["server"], audit["library"])).fetchall()
+            for correction in rows:
+                match = result.get(correction["item_id"])
+                book = books.get(correction["item_id"])
+                if (match and book and identity(book, correction["field"]) == correction["identity_digest"]
+                        and (correction["calibre_id"] is None or correction["calibre_id"] == match["id"])
+                        and correction["field"] in match["values"]
+                        and match["values"][correction["field"]] == json.loads(correction["proposed"])):
+                    db.execute("UPDATE corrections SET status='verified_in_calibre', calibre_id=?, calibre_verified=?, updated=? WHERE id=?",
+                               (match["id"], captured, captured, correction["id"]))
     return len(result)
