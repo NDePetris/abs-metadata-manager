@@ -38,11 +38,12 @@ def test_confirm_stage_apply_narrator_and_reimport(tmp_path, monkeypatch):
     aid = run_audit(store, api, api.libraries()[0])
     at = app(store, api, monkeypatch)
     page(at, "Match & Verify")
-    widget(at, "button", "Confirm all displayed fields").click().run()
+    widget(at, "button", "Select all").click().run()
+    widget(at, "button", "Confirm").click().run()
     assert not at.exception
     assert not preview(store, aid)["books"]
-    widget(at, "text_area", "Desired narrators (one name per line)").set_value("Correct Narrator")
-    widget(at, "button", "Confirm narrators").click().run()
+    widget(at, "text_input", "Desired narrators").set_value("Correct Narrator").run()
+    widget(at, "button", "Confirm").click().run()
     assert not at.exception and not api.writes
     page(at, "Changes")
     assert store.corrections(aid)[0]["proposed"] == ["Correct Narrator"]

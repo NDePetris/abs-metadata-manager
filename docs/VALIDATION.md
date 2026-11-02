@@ -1,3 +1,11 @@
+# Compact Match & Verify refinement — 2026-11-02
+
+Final full regression: **232 passed in 647.34 seconds**, no skips. Follow-up scoped Calibre/verification regressions also passed after the archive-only restriction on context-free catalogs. Ruff, pip check, launcher check, git diff --check and the native UI detector passed. A synthetic Windows DPAPI roundtrip, corrupt-blob recovery and forget also passed.
+
+Actual browser captures at 1280×800 and 1024×800 measured a **79.3% reduction** in field review plus actions: 2484.13 px to 513.59 px. All five ordinary audiobook rows, the three value columns and Confirm & Next fit together with the sidebar collapsed. No horizontal overflow was observed. Long/complex books may scroll. Validation used isolated synthetic storage, fake providers/adapters and the loopback simulator; no production metadata or media mutation occurred.
+
+See [the full refinement report, measurements, screenshots and existing-database instructions](COMPACT_REVIEW.md). Earlier validation records follow.
+
 # Streamlined desktop workflow — 2026-11-02
 
 Baseline: updated main at 9e190c6, containing merged PR #3 (485f9b4). Branch: codex/streamlined-metadata-ux.

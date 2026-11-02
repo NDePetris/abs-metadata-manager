@@ -90,6 +90,10 @@ def candidate(raw: dict, source: str, url: str = "", *, work_only=False) -> dict
     if "subtitle" in raw:
         v["subtitle"] = raw["subtitle"]
     result = {"source": source, "url": raw.get("url") or url, "values": v,
+              "supplied": [f for f, keys in {"title": ("title",), "subtitle": ("subtitle",),
+                           "authors": ("authors", "author"), "narrators": ("narrators", "narrator"),
+                           "series": ("series",), "identifiers": ("isbn", "asin")}.items()
+                           if any(k in raw for k in keys)],
               "language": raw.get("language"), "duration": raw.get("duration"),
               "abridged": raw.get("abridged"), "publisher": raw.get("publisher"),
               "published": raw.get("publishedDate", raw.get("publishedYear")),
@@ -108,6 +112,43 @@ def candidate(raw: dict, source: str, url: str = "", *, work_only=False) -> dict
         "duration": result["duration"], "abridged": result["abridged"],
         "publisher": result["publisher"], "published": result["published"], "work_only": work_only})
     return result
+
+
+def reference_values(match):
+    """Omission is not an empty value, including previously captured candidates."""
+    item = match["candidate"]
+    raw = item.get("raw", {})
+    raw = raw.get("volumeInfo", raw)
+    aliases = {"title": ("title",), "subtitle": ("subtitle",),
+               "authors": ("authors", "author", "author_name"), "narrators": ("narrators", "narrator"),
+               "series": ("series",), "identifiers": ("isbn", "asin")}
+    supplied = item.get("supplied")
+    if supplied is None:
+        supplied = [f for f, keys in aliases.items() if any(k in raw for k in keys)
+                    or f == "identifiers" and item["values"].get(f)]
+    result = {f: v for f, v in item["values"].items() if f in supplied}
+    for field in list(result):
+        keys = [k for k in aliases.get(field, (field,)) if k in raw]
+        if field != "identifiers" and not keys:
+            result.pop(field)
+            continue
+        original = raw[keys[0]] if keys else None
+        if field in ("authors", "narrators") and (original is None or not isinstance(original, (str, list))
+                                                   or original and not result[field]):
+            result[field] = None
+    return result
+
+
+def can_copy_reference(item, match, field):
+    supplied = reference_values(match)
+    if field not in supplied or supplied[field] is None or match["classification"] == "wrong_work":
+        return False
+    if field == "identifiers" and not supplied[field]:
+        return False  # No usable identifier; never infer a request to clear a group of identifiers.
+    if field in ("title", "authors") or item["type"] == "ebook":
+        return True
+    return not match["candidate"].get("work_only") and (
+        match["level"] == "recording" or item["selected_candidate"] == match["candidate_id"])
 
 
 def match(book: Book, item: dict) -> dict:

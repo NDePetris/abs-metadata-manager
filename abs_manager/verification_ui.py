@@ -1,13 +1,15 @@
-"""Book-focused native review; all external requests require explicit submission."""
+"""Compact native review. Draft state is separate from disposable widget state."""
+import copy
 import os
 
 import streamlit as st
 
 from . import preferences
 from .adapter import PublicMetadataTransport
-from .locking import operation_lock
-from .models import FIELDS
+from .locking import BusyError, operation_lock
+from .models import digest, review_fields
 from .sources import AbsSource, PublicSource
+from .verification import can_copy_reference, reference_values
 from .verification_workflow import run_verification, start_verification
 
 
@@ -20,155 +22,355 @@ def source_for(source_id, adapter):
 
 
 def display(value):
+    if value is None:
+        return "Not set"
+    if value == "" or value == [] or value == {}:
+        return "Empty"
     if isinstance(value, list):
-        return "\n".join(str(v) if not isinstance(v, dict) else
-                         f"{v.get('name', '')} · {v.get('sequence', '')}" for v in value) or "—"
-    return str(value) if value is not None else "—"
+        return "; ".join(str(v) if not isinstance(v, dict) else
+                         v.get("name", "") + (" · " + str(v["sequence"]) if v.get("sequence") is not None else "")
+                         for v in value)
+    if isinstance(value, dict):
+        return " · ".join(f"{k.upper()}: {v}" for k, v in value.items())
+    return str(value)
 
 
-def editor(field, value, key):
+def draft_scope(audit, item):
+    return "review:" + digest([audit["server"], audit["library"], audit["id"], item["item_id"]])
+
+
+def set_draft(scope, field, value):
+    state = st.session_state[scope]
+    state["targets"][field] = copy.deepcopy(value(state["targets"][field]) if callable(value) else value)
+    state["selected"][field] = True
+
+
+def text_control(label, value, key, changed=None, *, long=False):
+    # Widget keys can be removed by Streamlit on navigation. Rehydrate from durable session drafts.
+    if changed or key not in st.session_state:
+        st.session_state[key] = value
+    return (st.text_area if long else st.text_input)(label, key=key, label_visibility="collapsed",
+                                                   placeholder=label, on_change=changed,
+                                                   **({"height": 100} if long else {}))
+
+
+def editor(field, value, key, changed=None):
+    """Small typed editors, shared with Changes; never serialize names with delimiters."""
+    if changed is None and field in ("authors", "narrators", "series"):
+        rows = value if field == "series" else [{"name": name} for name in value]
+        edited = st.data_editor(rows or [{"name": "", **({"sequence": None} if field == "series" else {})}],
+                                num_rows="dynamic", key=key,
+                                column_config={"name": st.column_config.TextColumn("Name"),
+                                               "sequence": st.column_config.TextColumn("Position")})
+        return ([{"name": r["name"], "sequence": r.get("sequence") or None} for r in edited if r.get("name")]
+                if field == "series" else [r["name"] for r in edited if r.get("name")])
     if field in ("title", "subtitle"):
-        text = (st.text_area if field == "title" else st.text_input)("Desired " + field, value=value or "", key=key)
-        return None if value is None and not text else text
+        def update():
+            changed(st.session_state[key])
+        text = text_control("Desired " + field, value or "", key, update if changed else None,
+                            long=len(value or "") > 95 or "\n" in (value or ""))
+        return value if text == (value or "") else text
     if field == "identifiers":
-        return {k: st.text_input("Desired " + k, value=value.get(k, ""), key=key + k) for k in ("isbn", "asin")}
-    if field == "series":
-        rows = st.data_editor(value or [{"name": "", "sequence": None}], num_rows="dynamic", key=key,
-                              column_config={"sequence": st.column_config.TextColumn("Position")})
-        return [{"name": r["name"], "sequence": r.get("sequence") or None} for r in rows if r.get("name")]
-    text = st.text_area("Desired " + field + " (one name per line)", value="\n".join(value), key=key)
-    return [name.strip() for name in text.splitlines() if name.strip()]
+        result = dict(value)
+        for name in ("isbn", "asin"):
+            def update(name=name):
+                text = st.session_state[key + name]
+                changed(lambda current: {**current, name: text})
+            result[name] = text_control("Desired " + name, value.get(name, ""), key + name,
+                                        update if changed else None)
+        return value if all(result[k] == value.get(k, "") for k in result) else result
+    if field in ("authors", "narrators"):
+        rows = list(value)
+        if len(rows) <= 1:
+            def update():
+                text = st.session_state[key]
+                changed([text] if text else [])
+            text = text_control("Desired " + field, rows[0] if rows else "", key, update if changed else None)
+            result = [text] if text else []
+            return result
+        with st.popover(f"{len(rows)} names · Edit", width="stretch"):
+            result = []
+            for i, name in enumerate(rows):
+                def update(i=i):
+                    text = st.session_state[key + str(i)]
+                    changed(lambda current: [text if j == i else name for j, name in enumerate(current)])
+                result.append(text_control(f"Desired {field} {i + 1}", name, key + str(i), update if changed else None))
+                if changed:
+                    a, b = st.columns(2)
+                    if a.button("Move up", key=key + f":up:{i}", disabled=i == 0):
+                        rows[i - 1], rows[i] = name, rows[i - 1]
+                        changed(rows)
+                        st.rerun()
+                    if b.button("Remove", key=key + f":remove:{i}"):
+                        changed(rows[:i] + rows[i + 1:])
+                        st.rerun()
+            if changed and st.button("Add " + field, key=key + ":add"):
+                changed(rows + [""])
+                st.rerun()
+        return result
+    rows = copy.deepcopy(value)
+
+    def series_rows():
+        result = []
+        for i, row in enumerate(rows or [{"name": "", "sequence": None}]):
+            name_col, pos_col = st.columns([3, 1], gap="small")
+            entry = {}
+            for prop, col in (("name", name_col), ("sequence", pos_col)):
+                subkey = key + f":{i}:{prop}"
+                def update(i=i, prop=prop, subkey=subkey):
+                    text = st.session_state[subkey] or (None if prop == "sequence" else "")
+                    changed(lambda current: [{**r, prop: text} if j == i else r for j, r in
+                                            enumerate(current or [{"name": "", "sequence": None}])])
+                with col:
+                    text = text_control("Series " + ("position" if prop == "sequence" else "name"),
+                                        row.get(prop) or "", subkey, update if changed else None)
+                entry[prop] = text or (None if prop == "sequence" else "")
+            result.append(entry)
+            if changed and len(rows) > 1 and st.button("Remove series", key=key + f":remove:{i}"):
+                changed(rows[:i] + rows[i + 1:])
+                st.rerun()
+        if changed and st.button("Add series", key=key + ":add"):
+            changed(rows + [{"name": "", "sequence": None}])
+            st.rerun()
+        return result
+
+    if len(rows) > 1:
+        with st.popover(f"{len(rows)} series · Edit", width="stretch"):
+            result = series_rows()
+    else:
+        # Compact ordinary name/decimal position, additional rows disclosed on demand.
+        name_col, pos_col = st.columns([3, 1], gap="small")
+        row = (rows or [{"name": "", "sequence": None}])[0]
+        result = [dict(row)]
+        for prop, col in (("name", name_col), ("sequence", pos_col)):
+            subkey = key + ":" + prop
+            def update(prop=prop, subkey=subkey):
+                text = st.session_state[subkey] or (None if prop == "sequence" else "")
+
+                def apply(current):
+                    updated = {**(current[0] if current else {"name": "", "sequence": None}), prop: text}
+                    return [updated] if updated["name"] or updated["sequence"] is not None else []
+
+                changed(apply)
+            with col:
+                text = text_control("Series " + ("position" if prop == "sequence" else "name"), row.get(prop) or "",
+                                    subkey, update if changed else None)
+            result[0][prop] = text or (None if prop == "sequence" else "")
+    return result if any(r["name"] or r["sequence"] is not None for r in result) else []
+
+
+def reference_area(store, audit, item, scope):
+    aid, iid = audit["id"], item["item_id"]
+    matches = [m for m in item["matches"] if not m.get("rejected")]
+    match = None
+    if matches:
+        ids = [m["candidate_id"] for m in matches]
+        state = st.session_state[scope]
+        chosen = state.get("candidate", item["selected_candidate"])
+        if chosen not in ids:
+            chosen = ids[0]
+        st.session_state[scope + ":candidate"] = chosen
+
+        def choose_candidate():
+            state["candidate"] = st.session_state[scope + ":candidate"]
+
+        edition, summary_col = st.columns([3, 5], gap="small", vertical_alignment="center")
+        cid = edition.selectbox("Reference candidate", ids, key=scope + ":candidate", on_change=choose_candidate,
+                           label_visibility="collapsed", format_func=lambda c: next(
+                               m["candidate"]["source"] + " — " + display(m["candidate"]["values"].get("title"))
+                               for m in matches if m["candidate_id"] == c))
+        match = next(m for m in matches if m["candidate_id"] == cid)
+        c = match["candidate"]
+        classification = {"correct_recording": "Recording evidence matches", "recording_uncertain":
+                          "Title and author match; audiobook recording unconfirmed", "different_recording":
+                          "Different or uncertain recording", "wrong_work": "Wrong book or contradictory work"}[match["classification"]]
+        summary = classification + (" · Reference accepted by you" if item["selected_candidate"] == cid else " · Candidate only")
+        details = [f"{label}: {display(c[k])}" for k, label in (("published", "Year"), ("duration", "Duration (s)")) if c.get(k) is not None]
+        if c["values"].get("identifiers"):
+            details.append(display(c["values"]["identifiers"]))
+        summary_col.caption(summary + (" · " + " · ".join(details) if details else ""))
+        if match["contradictions"]:
+            st.warning("Contradictions: " + ", ".join(match["contradictions"]))
+    else:
+        st.caption("No reference selected. Search a source or continue manually.")
+    # One compact action strip; browsing a default candidate never accepts it.
+    with st.container(horizontal=True, gap="small"):
+        if match:
+            accept = "Accept book-level reference" if match["candidate"].get("work_only") else "This is my edition"
+            for label, decision in ((accept, "selected"), ("Not my edition", "rejected"), ("Wrong book", "wrong_book")):
+                if st.button(label, key=scope + label, disabled=decision == "selected" and match["classification"] == "wrong_work"):
+                    store.decide_candidate(aid, iid, match["candidate_id"], decision, label)
+                    st.session_state[scope]["manual"] = False
+                    st.rerun()
+        with st.popover("Search / Refine"):
+            providers = st.session_state.get("providers", [])
+            choices = ["abs:" + p["value"] for p in providers] + ["openlibrary", "googlebooks"]
+            preferred = preferences.load().get("source")
+            source = st.selectbox("Source", choices, index=choices.index(preferred) if preferred in choices else 0,
+                                  key=scope + ":source")
+            title = st.text_input("Refine title / ASIN or public query", key=scope + ":query")
+            with st.container(horizontal=True):
+                search = st.button("Search", key=scope + ":search")
+                another = st.button("Search another source", key=scope + ":another")
+            if search or another:
+                st.session_state[scope]["manual"] = False
+                preferences.save({**preferences.load(), "source": source})
+                src = source_for(source, st.session_state.get("adapter"))
+                overrides = {iid: {"title" if source.startswith("abs:") else "q": title}} if title.strip() else None
+                rid = start_verification(store, aid, src, [iid], refresh=True, query_overrides=overrides)
+                with st.spinner("Searching…"):
+                    run_verification(store, rid, src, limit=1)
+                decisions = store.candidate_decisions(aid, iid)
+                new_candidates = [c for lookup in store.verification_evidence(aid, iid)
+                                  if lookup["source"] == src.id and lookup["state"] == "ok"
+                                  for c in lookup.get("candidates", []) if not (
+                                      decisions.get(c["id"], {}).get("valid") and
+                                      decisions[c["id"]]["decision"] in ("rejected", "wrong_book"))]
+                if new_candidates:
+                    st.session_state[scope]["candidate"] = new_candidates[0]["id"]
+                st.rerun()
+        if st.button("Continue manually", key=scope + ":manual"):
+            st.session_state[scope]["manual"] = True
+            st.rerun()
+    return None if st.session_state[scope].get("manual") else match
 
 
 def verification_view(store, inventory):
-    st.title("Match & Verify")
-    audit = inventory(store)
-    if not audit:
-        st.info("Refresh a library in Import first.")
-        return
-    aid = audit["id"]
-    report = store.verification_report(aid)
-    if not report:
-        st.info("This library is empty.")
-        return
-    st.caption(f"{len(report)} books · {sum(r['review_status'] == 'Accepted' for r in report)} accepted")
-    query = st.text_input("Search books").casefold()
-    report.sort(key=lambda r: (r["review_status"] == "Accepted", str(r["fields"]["title"]["value"])))
-    visible = [r for r in report if query in str(r["fields"]["title"]["value"]).casefold()]
-    if not visible:
-        st.info("No matching books.")
-        return
-    ids = [r["item_id"] for r in visible]
-    scope = f"{audit['server']}:{audit['library']}"
-    key = "book:" + scope
-    if st.session_state.get(key) not in ids:
-        st.session_state[key] = ids[0]
-    previous, selector, following = st.columns([2, 5, 2])
-    index = ids.index(st.session_state[key])
-    if previous.button("Previous", disabled=index == 0):
-        st.session_state[key] = ids[index - 1]
-    if following.button("Next", disabled=index == len(ids) - 1):
-        st.session_state[key] = ids[index + 1]
-    iid = selector.selectbox("Book", ids, key=key, format_func=lambda i: next(
-        f"{r['fields']['title']['value']} · {i[:12]}" for r in visible if r["item_id"] == i))
-    item = next(r for r in report if r["item_id"] == iid)
-    adapter = st.session_state.get("adapter")
-    connected = adapter is not None and adapter.server == audit["server"]
-    with st.expander("Search reference sources"), st.form("search:" + scope):
-        providers = st.session_state.get("providers", [])
-        choices = ["abs:" + p["value"] for p in providers] + ["openlibrary", "googlebooks"]
-        preferred = preferences.load().get("source")
-        source = st.selectbox("Source", choices, index=choices.index(preferred) if preferred in choices else 0)
-        title = st.text_input("Refine title / ASIN or public query")
-        search = st.form_submit_button("Search")
-        another = st.form_submit_button("Search another source")
-    if search or another:
-        preferences.save({**preferences.load(), "source": source})
-        src = source_for(source, adapter)
-        overrides = {iid: {"title" if source.startswith("abs:") else "q": title}} if title.strip() else None
-        rid = start_verification(store, aid, src, [iid], refresh=True, query_overrides=overrides)
-        with st.spinner("Searching…"):
-            run_verification(store, rid, src, limit=1)
-        st.rerun()
-    for lookup in item["lookups"]:
-        st.caption(f"{lookup['source']} · {lookup['state']} · {lookup.get('captured', '')}")
-    matches = [m for m in item["matches"] if not m.get("rejected")]
-    reference = {}
-    if matches:
-        cid = st.selectbox("Reference edition", [m["candidate_id"] for m in matches], format_func=lambda c: next(
-            f"{m['candidate']['source']} · {display(m['candidate']['values'].get('narrators', []))} · {c[:8]}"
-            for m in matches if m["candidate_id"] == c))
-        match = next(m for m in matches if m["candidate_id"] == cid)
-        reference = match["candidate"]["values"]
-        st.write({"Edition": match["classification"], "Evidence": match["signals"],
-                  "Contradictions": match["contradictions"], "Duration": match["candidate"].get("duration"),
-                  "Identifiers": reference.get("identifiers")})
-        with st.form(f"edition:{aid}:{iid}"):
-            reason = st.text_input("Edition evidence")
-            actions = {"This is my edition": "selected", "Not my edition": "rejected", "Wrong book": "wrong_book"}
-            for label, decision in actions.items():
-                if st.form_submit_button(label):
-                    store.decide_candidate(aid, iid, cid, decision, reason or label)
-                    st.rerun()
-    st.caption("Continue manually at any time. Reference values are evidence; confirmation saves your desired values locally.")
-    corrections = {r["field"]: r for r in reversed(store.corrections(aid))
-                   if r["item_id"] == iid and r["accepted"] and r["status"] in ("pending", "edited_in_calibre", "verified_in_calibre")}
-    with st.form(f"fields:{aid}:{iid}"):
-        targets, selected = {}, []
-        single = None
-        use_reference = None
-        fields_shown = FIELDS if item["type"] == "audiobook" else (*FIELDS, "identifiers")
-        for field in fields_shown:
-            assessment = item["fields"][field]
-            decision = item["human_decisions"].get(field, {})
-            st.write("**" + field.capitalize() + "**")
-            saved, desired = st.columns(2)
-            saved.write("**Saved value**")
-            saved.text(display(assessment["value"]))
-            with desired:
-                draft_key = f"draft:{aid}:{iid}:{field}"
-                targets[field] = editor(field, st.session_state.get(draft_key, corrections.get(field, {}).get("proposed", assessment["value"])),
-                                        f"edit:{aid}:{iid}:{field}:" + str(st.session_state.get(draft_key + ":version", 0)))
-            st.caption(f"Independent: {assessment['status']} · Human: {decision.get('decision', 'Needs review')}"
-                       + (" · Correction pending" if field in corrections else ""))
-            if field in reference:
-                st.caption("Reference: " + display(reference[field]))
-                eligible = (match["classification"] != "wrong_work" and (field in ("title", "authors")
-                            or item["type"] == "ebook" or match["level"] == "recording"
-                            or item["selected_candidate"] == match["candidate_id"] and not match["candidate"].get("work_only")))
-                if st.form_submit_button("Use reference " + field, disabled=not eligible):
-                    use_reference = field
-            with st.expander("Evidence for " + field):
-                st.write(assessment["reason"])
-                for suggestion in assessment.get("local_findings", []):
-                    st.write({"Suggestion": suggestion["proposed"], "Reason": suggestion["reason"]})
-            if st.checkbox("Select " + field):
-                selected.append(field)
-            if st.form_submit_button("Confirm " + field):
-                single = field
-        note = st.text_input("Evidence / note (optional)")
-        confirm = st.form_submit_button("Confirm selected fields")
-        all_fields = st.form_submit_button("Confirm all displayed fields")
-        reopen = st.form_submit_button("Reopen selected fields")
-        later = st.form_submit_button("Review selected fields later")
-    if reopen or later:
-        store.decide_fields(aid, iid, selected, "reopened" if reopen else "later", note or "Human review decision")
-        st.rerun()
-    if use_reference:
-        draft_key = f"draft:{aid}:{iid}:{use_reference}"
-        st.session_state[draft_key] = reference[use_reference]
-        st.session_state[draft_key + ":version"] = st.session_state.get(draft_key + ":version", 0) + 1
-        st.rerun()
-    if single or confirm or all_fields:
-        fields = [single] if single else list(fields_shown) if all_fields else selected
-        store.confirm_targets(aid, iid, {f: targets[f] for f in fields}, note or "Human confirmed displayed values")
-        st.success("Confirmed. Edited values are staged in Changes; no remote write was sent.")
-    with st.expander("Cover, chapters, file and folder evidence"):
-        st.write("File metadata: Not checked · Folder verification: Not checked")
-        st.json({f: item["fields"][f] for f in ("cover", "chapters", "embedded")})
-        st.json(item["folder"])
-        if connected and st.button("Preview cover"):
-            with operation_lock(store.path):
-                st.image(adapter.cover(iid), width=220)
-    with st.expander("Advanced evidence and rejected editions"):
-        st.json(item)
+    with st.container(gap="xsmall"):
+        audit = inventory(store)
+        if not audit:
+            st.info("Refresh a library in Import first.")
+            return
+        aid = audit["id"]
+        report = store.verification_report(aid)
+        if not report:
+            st.info("This library is empty.")
+            return
+        report.sort(key=lambda r: (str(r["fields"]["title"]["value"]), r["item_id"]))
+        ids = [r["item_id"] for r in report]
+        scope_key = "book:" + digest([audit["server"], audit["library"], aid])
+        if st.session_state.get(scope_key) not in ids:
+            st.session_state[scope_key] = ids[0]
+        index = ids.index(st.session_state[scope_key])
+
+        def navigate(i):
+            st.session_state[scope_key] = ids[i]
+
+        previous, selector, following = st.columns([1.25, 6, 1], vertical_alignment="bottom", gap="small")
+        previous.button("Previous", disabled=index == 0, on_click=navigate, args=(index - 1,))
+        # Secondary labels distinguish duplicate titles without exposing internal IDs.
+        labels = {}
+        for r in report:
+            label = str(r["fields"]["title"]["value"]) + " · " + display(r["fields"]["authors"]["value"])
+            if sum(x["fields"]["title"]["value"] == r["fields"]["title"]["value"] for x in report) > 1:
+                label += " · " + r["type"] + " · " + (r["identity"].get("relPath") or r["identity"]["path"])
+            labels[r["item_id"]] = label
+        widget_key = scope_key + ":widget"
+        st.session_state[widget_key] = st.session_state[scope_key]
+
+        def choose():
+            st.session_state[scope_key] = st.session_state[widget_key]
+
+        iid = selector.selectbox("Book", ids, key=widget_key, format_func=labels.get, on_change=choose,
+                                 label_visibility="collapsed")
+        following.button("Next", disabled=index == len(ids) - 1, on_click=navigate, args=(index + 1,))
+        item = next(r for r in report if r["item_id"] == iid)
+        scope = draft_scope(audit, item)
+        corrections = {r["field"]: r for r in reversed(store.corrections(aid))
+                       if r["item_id"] == iid and r["accepted"] and r["status"] in ("pending", "edited_in_calibre", "verified_in_calibre")}
+        fields = review_fields(item["type"] == "audiobook")
+        if scope not in st.session_state:
+            st.session_state[scope] = {"targets": {f: copy.deepcopy(corrections.get(f, {}).get("proposed", item["fields"][f]["value"]))
+                                                   for f in fields}, "selected": {f: False for f in fields}}
+        state = st.session_state[scope]
+        st.caption(f"Book {ids.index(iid) + 1} / {len(ids)} · {sum(r['review_status'] == 'Accepted' for r in report)} accepted · Current = imported ABS snapshot")
+        match = reference_area(store, audit, item, scope)
+        reference = reference_values(match) if match else {}
+        with st.container(key="comparison", gap="xsmall"):
+            columns = st.columns([1.25, 2, 2, 2.7], gap="small")
+            for col, label in zip(columns, ("Field", "Current in ABS", "Reference", "Desired"), strict=True):
+                col.markdown("**" + label + "**")
+            for field in fields:
+                assessment = item["fields"][field]
+                label, current, ref, desired = st.columns([1.25, 2, 2, 2.7], gap="small")
+                skey = scope + ":select:" + field
+                st.session_state[skey] = state["selected"][field]
+
+                def select(field=field, skey=skey):
+                    state["selected"][field] = st.session_state[skey]
+
+                label.checkbox(field.capitalize(), key=skey, on_change=select)
+                decision = item["human_decisions"].get(field, {})
+                human = ("Accepted" if decision.get("decision") == "confirmed" else "Correction" if field in corrections else "Review") if decision.get("valid") else "Review"
+                with current, st.container(gap=None):
+                    st.write(display(assessment["value"]))
+                    st.caption(assessment["status"] + " · " + human)
+                with ref, st.container(gap=None):
+                    st.write(display(reference[field]) if field in reference else "Not supplied")
+                    if match and field in reference:
+                        copied = (lambda current, value=reference[field]: {**current, **value}
+                                  if isinstance(value, dict) else value) if field == "identifiers" else reference[field]
+                        st.button("Use reference", key=scope + ":copy:" + field,
+                                  help="Copy " + field + " to its draft; does not confirm or approve a write.",
+                                  disabled=not can_copy_reference(item, match, field),
+                                  on_click=set_draft, args=(scope, field, copied), type="tertiary")
+                with desired, st.container(gap=None):
+                    editor(field, state["targets"][field], scope + ":edit:" + field,
+                           lambda value, field=field: set_draft(scope, field, value))
+                    with st.container(horizontal=True, gap="small"):
+                        st.button("Restore current", key=scope + ":restore:" + field,
+                                  help="Restore imported " + field + " to the draft.", on_click=set_draft,
+                                  args=(scope, field, assessment["value"]), type="tertiary")
+                        if field in ("authors", "narrators", "series"):
+                            with st.popover("Add", type="tertiary", help="Add an individual name or series"):
+                                if st.button("Add " + field, key=scope + ":add:" + field):
+                                    set_draft(scope, field, state["targets"][field] +
+                                              ([{"name": "", "sequence": None}] if field == "series" else [""]))
+                                    st.rerun()
+        selected = [f for f in fields if state["selected"][f]]
+
+        def select_all():
+            state["selected"] = dict.fromkeys(fields, True)
+
+        with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+            st.button("Select all", on_click=select_all)
+            st.write(f"{len(selected)} selected")
+            confirm_next = st.button("Confirm & Next", type="primary", disabled=not selected)
+            confirm = st.button("Confirm", disabled=not selected)
+            with st.popover("More review actions"):
+                note = st.text_input("Note (optional)", key=scope + ":note")
+                reopen = st.button("Reopen Selected", disabled=not selected)
+                later = st.button("Review Later", disabled=not selected)
+        if confirm or confirm_next:
+            try:
+                store.confirm_targets(aid, iid, {f: state["targets"][f] for f in selected}, note or "Human confirmed displayed values")
+            except (ValueError, BusyError) as exc:
+                st.error(str(exc))
+            else:
+                state["selected"] = dict.fromkeys(fields, False)
+                st.session_state["review_message"] = "Confirmed locally. Corrections are in Changes; no remote write was sent."
+                if confirm_next and ids.index(iid) < len(ids) - 1:
+                    navigate(ids.index(iid) + 1)
+                st.rerun()
+        if reopen or later:
+            store.decide_fields(aid, iid, selected, "reopened" if reopen else "later", note or "Human review decision")
+            st.rerun()
+        if message := st.session_state.pop("review_message", None):
+            st.success(message)
+        with st.expander("Advanced / Evidence"):
+            st.caption("Human acceptance is separate from independent verification. Snapshot: " + str(audit["finished"]))
+            st.write("Desired metadata: " + ("Accepted target" if corrections else item["review_status"]))
+            observed = [r for r in store.corrections(aid) if r["item_id"] == iid and r["abs_observed"]]
+            verified = any(r["library"] == audit["library"] and r["item_id"] == iid and r["state"] == "verified"
+                           and r["action"] == "apply" for r in store.history(audit["server"]))
+            st.write("ABS metadata: " + ("Verified by readback (see History)" if verified else
+                                        "Observed on import" if observed else "Snapshot only; accepted corrections not checked"))
+            st.write("Embedded file metadata: Not checked · Folder structure: Not checked")
+            adapter = st.session_state.get("adapter")
+            if adapter and adapter.server == audit["server"] and st.button("Preview cover", key=scope + ":cover"):
+                with operation_lock(store.path):
+                    st.image(adapter.cover(iid), width=220)
+            if state.get("manual") and st.button("Show reference again"):
+                state["manual"] = False
+                st.rerun()
+            st.json(item)

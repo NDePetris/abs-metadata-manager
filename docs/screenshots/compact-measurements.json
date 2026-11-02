@@ -1,0 +1,22 @@
+{
+  "baselineCommit": "4441a76",
+  "baselineReviewHeight": 2484.125,
+  "metrics1280": {
+    "confirmBottom": 783.9896240234375,
+    "grid": 465.59375,
+    "gridTop": 270.3958435058594,
+    "height": 800,
+    "mainScrollWidth": 1270,
+    "mainWidth": 1270,
+    "width": 1280
+  },
+  "metrics1024": {
+    "confirmBottom": 783.9896240234375,
+    "grid": 465.59375,
+    "gridTop": 270.3958435058594,
+    "height": 800,
+    "mainScrollWidth": 1014,
+    "mainWidth": 1014,
+    "width": 1024
+  }
+}

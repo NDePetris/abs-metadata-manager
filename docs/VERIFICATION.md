@@ -67,7 +67,7 @@ Each candidate is retained with original JSON, source, source URL, normalized va
 
 Title alone never establishes recording identity. A work match requires title plus authors, or an exact identifier, without contradictory identity fields. A recording match additionally needs an audiobook provider and either a valid exact ASIN or matching narrators plus duration. ISBN agreement alone never proves recording identity. Duration tolerance is the larger of one minute or 2%. Contradictory duration, language, identity, or abridgment prevents an independent recording match. No numerical score authorizes any update.
 
-Candidates show one of five assessments: correct work and recording; correct work with recording uncertain; different recording of the same work; wrong work; or no match found. Use **This is my edition**, **Not my edition**, **Wrong book**, or **Unsure / review later** with evidence. Rejected candidates are hidden from the normal candidate selector; enable **Show rejected candidates** to inspect or reconsider them. Refine title/ASIN and author searches, and filter returned candidates by narrator. If your edition is absent, save a manual edition reference and recording evidence; it remains a human association. A manually selected same-work recording may supply a pending correction even when its credits conflict with saved values, but it never gains independent verification through that selection.
+Candidates show one of five assessments: correct work and recording; correct work with recording uncertain; different recording of the same work; wrong work; or no match found. Use **This is my edition**, **Not my edition**, **Wrong book**, or **Continue manually** as appropriate. Rejected candidates remain in Advanced / Evidence and never become accepted through a refreshed dropdown default. Search / Refine provides source selection and a refined title/ASIN or public query. Notes and Review Later are under More review actions. A manually selected same-work recording may supply a pending correction even when its credits conflict with saved values, but it never gains independent verification through that selection.
 
 Multiple plausible candidates remain ambiguous/unverified until inspected. Explicit edition decisions retain their evidence; a human association is not itself independent external verification. A work-level match cannot independently verify narrators, recording-specific series positions, or cover correctness. The algorithm deliberately prefers leaving fields unverified over choosing an edition by result order.
 
@@ -83,7 +83,7 @@ Chapters distinguish missing chapter data, a count without timings, generic labe
 
 ## Searches, cache, and offline operation
 
-Select a book in Match & Verify and expand Search reference sources. Search creates and executes one durable single-book lookup in the same explicit submission. Search another source uses the currently selected provider and retains the book. Rendering and navigation never request metadata. Provider decisions and raw evidence remain in Advanced evidence; supported stable recording identifiers preserve rejections across provider metadata refreshes. Work-only evidence cannot establish recording credits.
+Select a book in Match & Verify and open Search / Refine. Search creates and executes one durable single-book lookup in the same explicit submission. Search another source uses the currently selected provider and retains the book. Rendering and navigation never request metadata. Provider decisions and raw evidence remain in Advanced / Evidence; supported stable recording identifiers preserve rejections across provider metadata refreshes. Work-only evidence cannot establish recording credits.
 
 The sequential checkpointed bulk engine remains available internally through `start_verification` / `run_verification`; everyday run-management controls were removed. Cached results, unavailable outcomes, query provenance, and historic source evidence remain persisted.
 
@@ -92,7 +92,7 @@ The sequential checkpointed bulk engine remains available internally through `st
 Run this on the machine with your Calibre library, substituting its actual library path:
 
 ```powershell
-calibredb list --with-library 'D:\Calibre Library' --for-machine --fields title,authors,series,series_index,identifiers |
+calibredb list --with-library 'D:\Calibre Library' --for-machine --fields title,authors,series,series_index,identifiers,uuid |
     Set-Content -Encoding utf8 calibre-catalog.json
 ```
 
@@ -111,3 +111,6 @@ Ebooks remain read-only. Record the proposed Calibre correction and supporting e
 The ignored historical 110-book fixture produced a complete report with **110 books × 11 fields = 1,210 assessments**, embedded evidence for 110, saved cover paths for 110, and captured chapter arrays for 106. It produced **zero externally verified fields** before external lookups. These counts describe captured historical evidence, not current production metadata accuracy. No private inventory was added to Git.
 
 The full 656-ebook production catalog and live provider catalogs were not available for validation. Synthetic ebook, Calibre, missing-credit, multi-author/narrator, edition, and failure fixtures cover those paths. Image correctness, spoken chapter names, unknown translator credits, missing embedded tags, and unavailable provider fields remain unverified unless supported by recorded evidence. The report and source-coverage table expose those gaps directly.
+
+
+The compact comparison uses a shared applicability rule for local confirmation and UI selection. Ebook narrators stay available as historical evidence but cannot be selected/confirmed as ordinary ebook fields. Read-only Calibre verification requires an exact library context, a unique UUID and ID, and compatible original or accepted work metadata. Title and author targets may both differ from the imported ABS values. A persistent binding survives those accepted changes and subsequent imports. Ambiguous initial matches require explicit ID/UUID association in Advanced catalog input; contradictory records remain unmatched. Catalog uploads without context are archived only; they never associate a book or verify fields/corrections.
