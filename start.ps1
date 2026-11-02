@@ -25,7 +25,7 @@ if ($InstallCli) {
     & (Join-Path $PSScriptRoot 'scripts\install-cli.ps1')
     if ($LASTEXITCODE -ne 0) { throw 'abs-cli installation failed.' }
 }
-& $pythonPath -c 'import streamlit, requests, dotenv, abs_manager'
+& $pythonPath -c 'import streamlit, requests, abs_manager'
 if ($LASTEXITCODE -ne 0) { throw 'Dependencies missing. Run .\start.ps1 -Install.' }
 if ($Check) {
     Write-Output 'Launcher check passed. Python and app dependencies are ready.'

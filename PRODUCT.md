@@ -1,24 +1,16 @@
 # Product
 
-<!-- impeccable:product-schema 1 -->
-
 ## Platform
 web
 
 ## Stack
-User specified Python 3.12+, Streamlit, SQLite, pytest, and abs-cli subprocess integration.
+Python 3.12+, native Streamlit, SQLite, pytest, and abs-cli.
 
-## Users
-A personal Audiobookshelf library owner reviewing metadata on a Windows desktop.
+## Users and purpose
+A personal Windows desktop library owner verifies saved audiobook metadata, stages accepted targets, and processes exact guarded corrections. Ebooks remain Calibre-authoritative and read-only.
 
-## Product Purpose
-Audit an entire audiobook library, review field-level proposals, and apply explicitly approved corrections with live validation and recovery history.
+## Workflow
+Import → Match & Verify → Changes → History, plus Settings. One persistent global library selection. Book-focused manual/online verification feeds a library-wide correction queue. Algorithmic suggestions remain evidence until a human confirms a target. Field acceptance, write approval, and source synchronization are distinct.
 
-## Operating Context
-The server runs in Docker on an Intel N150. Requests must be sequential and paced. Approximately 110 audiobooks and 656 Calibre-managed ebooks. No production writes are authorized during development.
-
-## Capabilities and Constraints
-Primary views: Library, Verification, Review, Apply, History. A separate connection/settings view. Decisions and read-only verification evidence persist locally. Independent source searches are explicit and cannot approve changes. Each write requires approval and exact-preview confirmation. No media rewriting, folder changes, cover replacement, or chapter generation. Favor a practical desktop layout over visual polish.
-
-## Product Principles
-Explicit approval, visible evidence, conservative rules, durable recovery, and edition preservation.
+## Constraints
+Sequential paced requests, explicit actions, durable recovery, and no background work. File rewriting, folder renaming, automatic correction, and production writes during development are prohibited. Uninspected files are Not checked, not automatic outstanding work. Use synthetic development databases and credentials.

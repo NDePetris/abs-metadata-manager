@@ -81,13 +81,11 @@ Embedded M4B title, album, artist, and composer tags are shown only when already
 
 Chapters distinguish missing chapter data, a count without timings, generic labels, and captured named chapters. Captured timestamps are checked for finite numeric values, negatives, order, overlap, end before start, and duration boundaries when available. This validates structure, not spoken content or the edition's true chapter names. Cover presence is reported separately from correctness. A path or externally returned cover URL never proves that the saved image is correct; use the explicit read-only preview and record visual review evidence. Cover preview bytes are not retained in the offline cache.
 
-## Runs, cache, cancellation, and offline operation
+## Searches, cache, and offline operation
 
-Runs bind to an audit snapshot, source, and server scope. Queries and tasks are saved before network requests. A sequential action holds the same OS workspace lock as audits and writes. Every response is saved synchronously before proceeding. Successful and empty results are cached by source, server, normalized query, and schema version; identical queries within a run also reuse evidence. Cache reuse never discards the original capture time. Refresh explicitly creates new evidence. Latest lookup outcomes remain available with their raw source records. A failed refresh retains the previous successful response for the identical query as dated cached evidence while displaying the latest failure.
+Select a book in Match & Verify and expand Search reference sources. Search creates and executes one durable single-book lookup in the same explicit submission. Search another source uses the currently selected provider and retains the book. Rendering and navigation never request metadata. Provider decisions and raw evidence remain in Advanced evidence; supported stable recording identifiers preserve rejections across provider metadata refreshes. Work-only evidence cannot establish recording credits.
 
-Preparation makes no network requests. Start/resume is an explicit form submission. Set the action limit to the collection size (e.g. 110) to process all audiobooks, or keep smaller batches for easier pauses. Progress shows saved/total counts. Cancel signals the current run and stops pending queries at the next book boundary; it cannot recall an already submitted read. Streamlit Stop/process interruption retains completed tasks. Resume skips attached tasks; use the explicit retry checkbox for unavailable records. An unavailable response pauses further library requests. Empty and unavailable outcomes are distinct; conflicting candidates are shown through their matching contradictions. Public requests respect `Retry-After`; long delays stop the action for an explicit later retry.
-
-Rendering, filters, exports, and ordinary reruns use stored evidence only. There are no workers, startup requests, scheduled verification, or LLM calls. Offline report inspection, filtering, manual reviews, Calibre comparisons, and exports continue to work. A protocol-only `EvidenceAdjudicator` extension point exists for future explanation/adjudication; nothing invokes or configures an AI service.
+The sequential checkpointed bulk engine remains available internally through `start_verification` / `run_verification`; everyday run-management controls were removed. Cached results, unavailable outcomes, query provenance, and historic source evidence remain persisted.
 
 ## Read-only Calibre catalog
 
@@ -98,7 +96,7 @@ calibredb list --with-library 'D:\Calibre Library' --for-machine --fields title,
     Set-Content -Encoding utf8 calibre-catalog.json
 ```
 
-The JSON includes numeric record IDs automatically. Upload it through the Calibre catalog form. Export files contain private inventory data: keep them outside Git or under ignored `data/`. See [Calibre list documentation](https://manual.calibre-ebook.com/generated/en/calibredb.html#list).
+The JSON includes numeric record IDs automatically. Use Changes → Validate Calibre Changes with local paths configured in Settings. JSON upload remains an Advanced fallback. Export files contain private inventory data: keep them outside Git or under ignored `data/`. See [Calibre list documentation](https://manual.calibre-ebook.com/generated/en/calibredb.html#list).
 
 The importer accepts a single-library JSON array. It matches ebook records through a folder's numeric Calibre ID, valid ISBN, or exact title plus all authors. Ambiguous matches remain unmatched. It records catalog digest, import date, record ID, and values; Calibre comparisons are consistent/conflicting, never mislabeled as independent online verification. No Calibre database, EPUB, or managed folder is opened or edited. Custom translator/subtitle/cover columns are not currently mapped. Without a uniquely matched catalog record, the report displays its ABS/filesystem-only limitation.
 

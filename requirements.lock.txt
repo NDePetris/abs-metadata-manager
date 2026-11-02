@@ -25,7 +25,6 @@ pydeck==0.9.3
 Pygments==2.21.0
 pytest==9.2.0
 python-dateutil==3.0.0
-python-dotenv==1.2.4
 python-multipart==0.0.32
 referencing==0.37.0
 requests==2.34.2

@@ -1,296 +1,174 @@
-"""Native desktop verification workspace. Network actions only in submit branches."""
-from __future__ import annotations
-
-import json
+"""Book-focused native review; all external requests require explicit submission."""
 import os
-from urllib.parse import urlsplit
 
 import streamlit as st
 
+from . import preferences
 from .adapter import PublicMetadataTransport
-from .calibre import import_catalog
 from .locking import operation_lock
-from .models import FIELDS, compact, digest
-from .resolution_ui import MATCHES
+from .models import FIELDS
 from .sources import AbsSource, PublicSource
-from .verification import QUALITY_FIELDS, STATUSES, export_csv
-from .verification_workflow import (
-    propose_discrepancy,
-    retry_unavailable,
-    run_verification,
-    start_verification,
-)
+from .verification_workflow import run_verification, start_verification
 
 
 def source_for(source_id, adapter):
     if source_id.startswith("abs:"):
         if adapter is None:
-            raise ValueError("Connect to the original server in Settings.")
+            raise ValueError("Connect to the original server first.")
         return AbsSource(adapter, source_id[4:])
-    return PublicSource(source_id, PublicMetadataTransport(os.getenv("GOOGLE_BOOKS_API_KEY", ""),
-                                                         os.getenv("METADATA_CONTACT", "")))
+    return PublicSource(source_id, PublicMetadataTransport(os.getenv("GOOGLE_BOOKS_API_KEY", "")))
 
 
-def verification_view(store, choose_snapshot):
+def display(value):
+    if isinstance(value, list):
+        return "\n".join(str(v) if not isinstance(v, dict) else
+                         f"{v.get('name', '')} · {v.get('sequence', '')}" for v in value) or "—"
+    return str(value) if value is not None else "—"
+
+
+def editor(field, value, key):
+    if field in ("title", "subtitle"):
+        text = (st.text_area if field == "title" else st.text_input)("Desired " + field, value=value or "", key=key)
+        return None if value is None and not text else text
+    if field == "identifiers":
+        return {k: st.text_input("Desired " + k, value=value.get(k, ""), key=key + k) for k in ("isbn", "asin")}
+    if field == "series":
+        rows = st.data_editor(value or [{"name": "", "sequence": None}], num_rows="dynamic", key=key,
+                              column_config={"sequence": st.column_config.TextColumn("Position")})
+        return [{"name": r["name"], "sequence": r.get("sequence") or None} for r in rows if r.get("name")]
+    text = st.text_area("Desired " + field + " (one name per line)", value="\n".join(value), key=key)
+    return [name.strip() for name in text.splitlines() if name.strip()]
+
+
+def verification_view(store, inventory):
     st.title("Match & Verify")
-    st.write("Find the correct work and recording before comparing metadata. A work match can support a title or author; "
-             "narrators and other edition details require recording evidence. Human choices remain separate from independent verification.")
-    audit = choose_snapshot(store)
-    if audit is None:
-        st.info("Complete an audit in Import, or load its read-only sample library.")
-        return
-    if audit["status"] != "complete":
-        st.info("Finish or resume this audit from Import before verification.")
+    audit = inventory(store)
+    if not audit:
+        st.info("Refresh a library in Import first.")
         return
     aid = audit["id"]
-    adapter = st.session_state.get("adapter")
-    connected = adapter is not None and adapter.server == audit["server"]
     report = store.verification_report(aid)
     if not report:
-        st.info("This completed snapshot contains no books.")
+        st.info("This library is empty.")
         return
-    by_id = {r["item_id"]: r for r in report}
-    title = lambda key: by_id[key]["fields"]["title"]["value"] or key
-    st.write(f"**{len(report)} books** · {sum(r['type'] == 'audiobook' for r in report)} audiobooks · "
-             f"{sum(r['type'] == 'ebook' for r in report)} ebooks")
-    st.dataframe([{"Field": field, **{status: sum(b["fields"][field]["status"] == status for b in report)
-                                             for status in STATUSES}} for field in QUALITY_FIELDS],
-                 hide_index=True, width="stretch")
-    with st.expander("Coverage by evidence source"):
-        st.dataframe([
-            {"Evidence": "Audiobookshelf saved metadata", "Books with captured evidence": len(report),
-             "Limit": "Saved values do not by themselves verify accuracy."},
-            {"Evidence": "Embedded audiobook tags", "Books with captured evidence": sum(
-                bool(b["fields"]["embedded"]["value"]) for b in report),
-             "Limit": "Only tags exposed by ABS. Composer is not assumed narrator."},
-            {"Evidence": "External bibliographic / recording", "Books with captured evidence": sum(
-                any(l.get("previous_success", l)["state"] == "ok" for l in b["lookups"]) for b in report),
-             "Limit": "Work matches cannot corroborate recording narrators or saved cover images."},
-            {"Evidence": "Cover presence", "Books with captured evidence": sum(
-                bool(b["fields"]["cover"]["value"]) for b in report), "Limit": "Correctness requires visual edition review."},
-            {"Evidence": "Audio chapter data", "Books with captured evidence": sum(
-                bool(b["fields"]["chapters"]["value"]) and b["type"] == "audiobook" for b in report),
-             "Limit": "Timing validation is local; content/name correctness needs recording evidence."},
-            {"Evidence": "Calibre catalog / ebook", "Books with captured evidence": sum(
-                b["type"] == "ebook" and b["calibre_limitation"] is None for b in report),
-             "Limit": "Unmatched ebooks have only ABS/filesystem evidence."}], hide_index=True, width="stretch")
-    with st.expander("Independent online lookups · explicit actions only"):
-        st.caption("Queries send title/author or ASIN/ISBN to the selected source. ABS providers are discovered "
-                   "from your connected server. Open Library is single-book only. Google Books needs your API key. "
-                   "No AI service is used. Results are cached indefinitely until you explicitly refresh.")
-        with st.form("discover_verification_providers"):
-            discover = st.form_submit_button("Discover server metadata providers", disabled=not connected)
-        if discover:
-            with operation_lock(store.path):
-                st.session_state["verification_providers"] = {"server": adapter.server,
-                                                              "rows": adapter.metadata_providers()}
-        discovery = st.session_state.get("verification_providers", {})
-        providers = discovery.get("rows", []) if connected and discovery.get("server") == adapter.server else []
-        choices = ["abs:" + p["value"] for p in providers] + ["openlibrary", "googlebooks"]
-        provider_names = {"abs:" + p["value"]: p.get("text", p["value"]) for p in providers}
-        provider_names.update(openlibrary="Open Library · work evidence", googlebooks="Google Books · bibliographic evidence")
-        if providers:
-            st.dataframe([{"Provider": p.get("text", p["value"]), "ID": p["value"],
-                           "Purpose": "Recording comparison" if any(s in p["value"].lower()
-                               for s in ("audible", "audnexus")) else "Work / bibliographic comparison",
-                           "Evidence": "Returned title, authors, identifiers; narrator, duration and edition data when available"}
-                          for p in providers], hide_index=True, width="stretch")
-        else:
-            st.info("Connect in Settings and discover server providers to search recording catalogs. Public work sources are available below.")
-        with st.form(f"start_verification_{aid}"):
-            source_id = st.selectbox("Lookup source", choices, format_func=provider_names.get)
-            scope = st.radio("Lookup scope", ["One book", "Selected books", "All audiobooks"])
-            selected = st.multiselect("Books for lookup", list(by_id), format_func=title)
-            st.caption("For one book, refine the query below. ABS supports title and author; enter an ASIN in title "
-                       "for Audible. Narrator is compared after search, because abs-cli has no narrator query flag.")
-            refined_title = st.text_input("Alternate title or recording ASIN")
-            refined_author = st.text_input("Search author")
-            refined_query = st.text_input("Public catalog query (optional)", help="For example isbn:9781234567897 or a title and author query.")
-            refresh = st.checkbox("Refresh cached evidence with new requests", value=False)
-            start = st.form_submit_button("Prepare online verification run")
-        if start:
-            ids = [b["item_id"] for b in report if b["type"] == "audiobook"] if scope == "All audiobooks" else selected
-            if scope == "One book" and len(ids) != 1:
-                raise ValueError("Select exactly one book.")
-            overrides = {}
-            if any(v.strip() for v in (refined_title, refined_author, refined_query)):
-                if len(ids) != 1:
-                    raise ValueError("Search refinements apply to exactly one selected book.")
-                if source_id.startswith("abs:"):
-                    if refined_query.strip():
-                        raise ValueError("Use title / ASIN and author for an ABS provider.")
-                    query = {k: v.strip() for k, v in (("title", refined_title), ("author", refined_author)) if v.strip()}
-                else:
-                    query = {"q": refined_query.strip() or " ".join(v.strip() for v in
-                             (refined_title, refined_author) if v.strip())}
-                overrides[ids[0]] = query
-            start_verification(store, aid, source_for(source_id, adapter), ids, refresh=refresh,
-                               query_overrides=overrides)
-            st.success("Run prepared locally. Start or resume it below to make read-only requests.")
-        runs = store.verification_runs(aid)
-        if runs:
-            st.dataframe([{k: r[k] for k in ("id", "source", "state", "done", "total", "updated")}
-                          for r in runs], hide_index=True, width="stretch")
-            rid = st.selectbox("Verification run", [r["id"] for r in runs])
-            run = next(r for r in runs if r["id"] == rid)
-            st.progress(run["done"] / max(run["total"], 1), text=f"{run['done']} / {run['total']} captured")
-            st.caption("Each response is saved immediately. Cancel stops pending requests at the next book boundary. "
-                       "Streamlit Stop can interrupt this action; resume retains all completed records. "
-                       "Use a small batch for frequent pause/cancel opportunities.")
-            with st.form(f"resume_verification_{rid}"):
-                batch = st.number_input("Maximum books this action", min_value=1, max_value=1000, value=10)
-                retry = st.checkbox("Retry unavailable records explicitly", value=False)
-                go = st.form_submit_button("Start / resume read-only lookups")
-                cancel = st.form_submit_button("Cancel pending lookups")
-            if cancel:
-                store.cancel_verification(rid)
-                st.rerun()
-            if go:
-                source = source_for(run["source"], adapter)
-                if retry:
-                    retry_unavailable(store, rid)
-                bar = st.progress(0)
-                run_verification(store, rid, source, limit=int(batch),
-                                 progress=lambda done, total, state: bar.progress(
-                                     done / max(total, 1), text=f"{done} / {total} · {state}"))
-                st.rerun()
-    with st.expander("Read-only Calibre catalog input"):
-        st.caption('Export using: calibredb list --for-machine --fields title,authors,series,series_index,identifiers '
-                   '> calibre-catalog.json. Upload that JSON from one Calibre library. Matching uses folder ID, '
-                   'ISBN, or exact title plus authors; ambiguous matches remain unmatched. No Calibre database is opened.')
-        with st.form(f"calibre_import_{aid}"):
-            upload = st.file_uploader("Calibre JSON catalog", type=["json"])
-            submit_catalog = st.form_submit_button("Compare Calibre catalog")
-        if submit_catalog:
-            if upload is None:
-                raise ValueError("Choose an exported JSON catalog.")
-            count = import_catalog(store, aid, upload.getvalue().decode("utf-8-sig"))
-            st.success(f"Matched {count} ebooks. Reopen Match & Verify to see the comparison.")
-    col1, col2, col3 = st.columns(3)
-    search = col1.text_input("Search quality report").casefold()
-    statuses = col2.multiselect("Quality statuses", STATUSES)
-    ambiguous = col3.checkbox("Ambiguous editions only")
-    visible = [b for b in report if search in str(title(b["item_id"])).casefold()
-               and (not statuses or any(f["status"] in statuses for f in b["fields"].values()))
-               and (not ambiguous or b["ambiguous"])]
-    st.dataframe([{"Book": title(b["item_id"]), "Type": b["type"], "Ambiguous": b["ambiguous"],
-                   **{k: f["status"] for k, f in b["fields"].items()}} for b in visible],
-                 hide_index=True, width="stretch")
-    st.download_button("Export complete quality report (JSON)", json.dumps(
-        {"schema": 1, "snapshot": audit, "books": report}, ensure_ascii=False, indent=2),
-        f"verification-{aid}.json", "application/json")
-    st.download_button("Export complete quality report (CSV)", export_csv(report),
-                       f"verification-{aid}.csv", "text/csv")
+    st.caption(f"{len(report)} books · {sum(r['review_status'] == 'Accepted' for r in report)} accepted")
+    query = st.text_input("Search books").casefold()
+    report.sort(key=lambda r: (r["review_status"] == "Accepted", str(r["fields"]["title"]["value"])))
+    visible = [r for r in report if query in str(r["fields"]["title"]["value"]).casefold()]
     if not visible:
-        st.info("No books match these filters. Exports still include every book.")
+        st.info("No matching books.")
         return
-    item_id = st.selectbox("Inspect verification book", [b["item_id"] for b in visible], format_func=title)
-    item = by_id[item_id]
-    if item["calibre_limitation"]:
-        st.info(item["calibre_limitation"])
-    st.dataframe([{"Field": key, "Saved value": json.dumps(f["value"], ensure_ascii=False),
-                   "Status": f["status"], "Assessment": f["reason"],
-                   "Human outcome": f["human_review"].get("outcome", "Reviewed") if f["human_review"] else "",
-                   "Human reviewed": f["human_review"]["date"] if f["human_review"] else ""}
-                  for key, f in item["fields"].items()], hide_index=True, width="stretch")
-    left, right = st.columns(2)
-    with left:
-        st.write("**Saved Audiobookshelf values**")
-        st.json({k: f["value"] for k, f in item["fields"].items() if k != "embedded"})
-    with right:
-        st.write("**Captured embedded tags and folder evidence**")
-        st.json({"embedded": item["fields"]["embedded"]["value"], "folder": item["folder"]})
-    with st.expander("All field provenance and lookup outcomes"):
-        if item["lookups"]:
-            st.dataframe([{k: lookup[k] for k in ("source", "captured", "state")}
-                          for lookup in item["lookups"]], hide_index=True, width="stretch")
-        st.json(item)
-    if connected and item["fields"]["cover"]["value"]:
-        with st.form(f"verification_cover_{aid}_{item_id}"):
-            cover = st.form_submit_button("Preview saved cover (read-only)")
-        if cover:
-            with operation_lock(store.path):
-                st.image(adapter.cover(item_id), width=220)
-    all_matches = {m["candidate_id"]: m for m in item["matches"]}
-    narrator_filter = st.text_input("Filter candidates by narrator").strip().casefold() if all_matches else ""
-    show_rejected = st.checkbox("Show rejected candidates", value=False) if all_matches else False
-    matches = {cid: m for cid, m in all_matches.items()
-               if (show_rejected or not m.get("rejected")) and (not narrator_filter or narrator_filter in
-                   " ".join(m["candidate"]["values"].get("narrators", [])).casefold())}
-    if all_matches and not matches:
-        st.info("No candidates match this filter. Rejections are retained in history; enable Show rejected candidates to inspect them.")
-    st.write(f"Edition assessment: **{MATCHES.get(item.get('match_classification'), 'No match found')}**")
-    if item.get("manual_edition"):
-        st.info(f"Your edition is associated manually: {item['manual_edition']['evidence']}. "
-                "Catalog verification remains independent.")
-    decisions = store.candidate_decisions(aid, item_id)
-    if matches:
-        cid = st.selectbox("Inspect external candidate / edition", list(matches),
-                           format_func=lambda key: f"{matches[key]['candidate']['source']} · "
-                           f"{matches[key]['candidate']['values'].get('title')} · "
-                           f"{', '.join(matches[key]['candidate']['values'].get('narrators', []))} · {key[:8]}")
-        m = matches[cid]
-        st.write(f"**{MATCHES.get(m.get('classification'), m['level'])}** · Match level: **{m['level']}** · "
-                 f"signals: {', '.join(m['signals']) or 'none'} · "
-                 f"contradictions: {', '.join(m['contradictions']) or 'none'}")
-        previous = decisions.get(cid)
-        if previous:
-            st.info(f"Your candidate decision: {previous['decision']} · {previous['evidence']} · "
-                    f"{'Current' if previous['valid'] else 'Identity changed; review again'}")
-        st.dataframe([{"Field": f, "Audiobookshelf": json.dumps(item["fields"][f]["value"], ensure_ascii=False),
-                       "External candidate": json.dumps(v, ensure_ascii=False)}
-                      for f, v in m["candidate"]["values"].items() if f in item["fields"]],
-                     hide_index=True, width="stretch")
-        url = m["candidate"]["url"]
-        if urlsplit(url).scheme in ("https", "http") and urlsplit(url).netloc:
-            st.link_button("Open source reference", url)
-        with st.form(f"select_edition_{aid}_{item_id}"):
-            reason = st.text_input("Edition selection evidence")
-            select = st.form_submit_button("This is my edition")
-            reject = st.form_submit_button("Not my edition")
-            wrong = st.form_submit_button("Wrong book")
-            unsure = st.form_submit_button("Unsure / review later")
-        if select or reject or wrong or unsure:
-            if not reason.strip():
-                raise ValueError("Describe why you selected or rejected this candidate.")
-            store.decide_candidate(aid, item_id, cid, "selected" if select else "rejected" if reject else
-                                   "wrong_book" if wrong else "unsure", reason)
-            st.rerun()
-        with st.form(f"verification_proposal_{aid}_{item_id}"):
-            field = st.selectbox("Supported discrepancy field", FIELDS)
-            propose = st.form_submit_button("Create pending correction in Resolve",
-                                            disabled=item["type"] != "audiobook" or bool(audit["read_only"]))
-        if propose:
-            propose_discrepancy(store, aid, item_id, field, cid)
-            st.success("Pending proposal created. Approve it in Resolve, then confirm the exact batch in Update Sources.")
-    with st.expander("Associate an edition missing from catalogs"):
-        st.caption("Record your own edition evidence, including identifiers and credits when available. "
-                   "This association cannot establish independent verification or authorize an update.")
-        with st.form(f"absent_edition_{aid}_{item_id}"):
-            reference = st.text_input("Edition reference / identifier")
-            edition_evidence = st.text_area("Manual recording evidence", help="For example narrator, runtime, language, abridgment, publisher, or purchase reference.")
-            absent = st.form_submit_button("Save manual edition association")
-        if absent:
-            if not reference.strip() or not edition_evidence.strip():
-                raise ValueError("Provide an edition reference and recording evidence.")
-            data = {"reference": reference.strip(), "evidence": edition_evidence.strip()}
-            store.decide_candidate(aid, item_id, "manual:" + digest(data), "absent", compact(data))
-            st.rerun()
-    with st.expander("Edition decision and rejection history"):
-        history = store.candidate_decisions(aid, item_id, history=True)
-        if history:
-            st.dataframe([{k: row[k] for k in ("candidate_id", "decision", "evidence", "created", "audit_id", "valid")}
-                          for row in history], hide_index=True, width="stretch")
-        else:
-            st.caption("No edition decisions yet. Rejected candidates stay recorded across future audits.")
-    with st.form(f"human_review_{aid}_{item_id}"):
-        field = st.selectbox("Manually reviewed field", QUALITY_FIELDS)
-        outcome = st.selectbox("Human review outcome", ["Reviewed", "Confirmed error", "Formatting preference", "Unresolved"])
-        evidence = st.text_area("Human review evidence / source reference")
-        reviewed = st.form_submit_button("Record manual review")
-    if reviewed:
-        store.annotate_verification(aid, item_id, field, evidence, outcome=outcome)
+    ids = [r["item_id"] for r in visible]
+    scope = f"{audit['server']}:{audit['library']}"
+    key = "book:" + scope
+    if st.session_state.get(key) not in ids:
+        st.session_state[key] = ids[0]
+    previous, selector, following = st.columns([2, 5, 2])
+    index = ids.index(st.session_state[key])
+    if previous.button("Previous", disabled=index == 0):
+        st.session_state[key] = ids[index - 1]
+    if following.button("Next", disabled=index == len(ids) - 1):
+        st.session_state[key] = ids[index + 1]
+    iid = selector.selectbox("Book", ids, key=key, format_func=lambda i: next(
+        f"{r['fields']['title']['value']} · {i[:12]}" for r in visible if r["item_id"] == i))
+    item = next(r for r in report if r["item_id"] == iid)
+    adapter = st.session_state.get("adapter")
+    connected = adapter is not None and adapter.server == audit["server"]
+    with st.expander("Search reference sources"), st.form("search:" + scope):
+        providers = st.session_state.get("providers", [])
+        choices = ["abs:" + p["value"] for p in providers] + ["openlibrary", "googlebooks"]
+        preferred = preferences.load().get("source")
+        source = st.selectbox("Source", choices, index=choices.index(preferred) if preferred in choices else 0)
+        title = st.text_input("Refine title / ASIN or public query")
+        search = st.form_submit_button("Search")
+        another = st.form_submit_button("Search another source")
+    if search or another:
+        preferences.save({**preferences.load(), "source": source})
+        src = source_for(source, adapter)
+        overrides = {iid: {"title" if source.startswith("abs:") else "q": title}} if title.strip() else None
+        rid = start_verification(store, aid, src, [iid], refresh=True, query_overrides=overrides)
+        with st.spinner("Searching…"):
+            run_verification(store, rid, src, limit=1)
         st.rerun()
-    st.caption("Translator, cover, chapter, identifier, and embedded-tag corrections remain read-only. "
-               "Use Audiobookshelf or your source catalog deliberately for external remediation. "
-               "Formatting preferences are advisory; conflicting evidence alone does not establish which source is wrong.")
+    for lookup in item["lookups"]:
+        st.caption(f"{lookup['source']} · {lookup['state']} · {lookup.get('captured', '')}")
+    matches = [m for m in item["matches"] if not m.get("rejected")]
+    reference = {}
+    if matches:
+        cid = st.selectbox("Reference edition", [m["candidate_id"] for m in matches], format_func=lambda c: next(
+            f"{m['candidate']['source']} · {display(m['candidate']['values'].get('narrators', []))} · {c[:8]}"
+            for m in matches if m["candidate_id"] == c))
+        match = next(m for m in matches if m["candidate_id"] == cid)
+        reference = match["candidate"]["values"]
+        st.write({"Edition": match["classification"], "Evidence": match["signals"],
+                  "Contradictions": match["contradictions"], "Duration": match["candidate"].get("duration"),
+                  "Identifiers": reference.get("identifiers")})
+        with st.form(f"edition:{aid}:{iid}"):
+            reason = st.text_input("Edition evidence")
+            actions = {"This is my edition": "selected", "Not my edition": "rejected", "Wrong book": "wrong_book"}
+            for label, decision in actions.items():
+                if st.form_submit_button(label):
+                    store.decide_candidate(aid, iid, cid, decision, reason or label)
+                    st.rerun()
+    st.caption("Continue manually at any time. Reference values are evidence; confirmation saves your desired values locally.")
+    corrections = {r["field"]: r for r in reversed(store.corrections(aid))
+                   if r["item_id"] == iid and r["accepted"] and r["status"] in ("pending", "edited_in_calibre", "verified_in_calibre")}
+    with st.form(f"fields:{aid}:{iid}"):
+        targets, selected = {}, []
+        single = None
+        use_reference = None
+        fields_shown = FIELDS if item["type"] == "audiobook" else (*FIELDS, "identifiers")
+        for field in fields_shown:
+            assessment = item["fields"][field]
+            decision = item["human_decisions"].get(field, {})
+            st.write("**" + field.capitalize() + "**")
+            saved, desired = st.columns(2)
+            saved.write("**Saved value**")
+            saved.text(display(assessment["value"]))
+            with desired:
+                draft_key = f"draft:{aid}:{iid}:{field}"
+                targets[field] = editor(field, st.session_state.get(draft_key, corrections.get(field, {}).get("proposed", assessment["value"])),
+                                        f"edit:{aid}:{iid}:{field}:" + str(st.session_state.get(draft_key + ":version", 0)))
+            st.caption(f"Independent: {assessment['status']} · Human: {decision.get('decision', 'Needs review')}"
+                       + (" · Correction pending" if field in corrections else ""))
+            if field in reference:
+                st.caption("Reference: " + display(reference[field]))
+                eligible = (match["classification"] != "wrong_work" and (field in ("title", "authors")
+                            or item["type"] == "ebook" or match["level"] == "recording"
+                            or item["selected_candidate"] == match["candidate_id"] and not match["candidate"].get("work_only")))
+                if st.form_submit_button("Use reference " + field, disabled=not eligible):
+                    use_reference = field
+            with st.expander("Evidence for " + field):
+                st.write(assessment["reason"])
+                for suggestion in assessment.get("local_findings", []):
+                    st.write({"Suggestion": suggestion["proposed"], "Reason": suggestion["reason"]})
+            if st.checkbox("Select " + field):
+                selected.append(field)
+            if st.form_submit_button("Confirm " + field):
+                single = field
+        note = st.text_input("Evidence / note (optional)")
+        confirm = st.form_submit_button("Confirm selected fields")
+        all_fields = st.form_submit_button("Confirm all displayed fields")
+        reopen = st.form_submit_button("Reopen selected fields")
+        later = st.form_submit_button("Review selected fields later")
+    if reopen or later:
+        store.decide_fields(aid, iid, selected, "reopened" if reopen else "later", note or "Human review decision")
+        st.rerun()
+    if use_reference:
+        draft_key = f"draft:{aid}:{iid}:{use_reference}"
+        st.session_state[draft_key] = reference[use_reference]
+        st.session_state[draft_key + ":version"] = st.session_state.get(draft_key + ":version", 0) + 1
+        st.rerun()
+    if single or confirm or all_fields:
+        fields = [single] if single else list(fields_shown) if all_fields else selected
+        store.confirm_targets(aid, iid, {f: targets[f] for f in fields}, note or "Human confirmed displayed values")
+        st.success("Confirmed. Edited values are staged in Changes; no remote write was sent.")
+    with st.expander("Cover, chapters, file and folder evidence"):
+        st.write("File metadata: Not checked · Folder verification: Not checked")
+        st.json({f: item["fields"][f] for f in ("cover", "chapters", "embedded")})
+        st.json(item["folder"])
+        if connected and st.button("Preview cover"):
+            with operation_lock(store.path):
+                st.image(adapter.cover(iid), width=220)
+    with st.expander("Advanced evidence and rejected editions"):
+        st.json(item)
