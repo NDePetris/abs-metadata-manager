@@ -7,6 +7,8 @@ def test_lookup_executes_immediately_and_reruns_do_not_fetch(setup, monkeypatch)
     api.metadata_search = lambda provider, query: calls.append((provider, query)) or []
     at = app(store, api, monkeypatch)
     at.session_state["providers"] = [{"value": "audible"}]
+    at.session_state["provider_discovery"] = {"server": api.server, "status": "available",
+                                               "providers": at.session_state["providers"]}
     page(at, "Match & Verify")
     widget(at, "button", "Search").click().run()
     assert not at.exception and len(calls) == 1
@@ -23,6 +25,8 @@ def test_reject_then_search_another_source(setup, monkeypatch):
     api.metadata_search = search
     at = app(store, api, monkeypatch)
     at.session_state["providers"] = [{"value": "audible"}, {"value": "audnexus"}]
+    at.session_state["provider_discovery"] = {"server": api.server, "status": "available",
+                                               "providers": at.session_state["providers"]}
     page(at, "Match & Verify")
     widget(at, "button", "Search").click().run()
     widget(at, "button", "Not my edition").click().run()

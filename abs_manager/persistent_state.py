@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime
 
 from .locking import operation_lock
-from .models import FIELDS, compact, digest, review_fields, validate_target
+from .models import FIELDS, compact, digest, result_matches, review_fields, target_observed, validate_target
 from .verification import QUALITY_FIELDS, values
 
 
@@ -126,7 +126,8 @@ class PersistentState:
             data = row["data"]
             if (row["state"] == "verified" and row["action"] == "apply" and row["library"] == audit["library"]
                     and row["item_id"] == item_id and data.get("before") == original.values
-                    and data.get("after") == current.values and data.get("protected") == current.protected()
+                    and result_matches(data.get("after", {}), current.values, data.get("changes", {}))
+                    and data.get("protected") == current.protected()
                     and data.get("identity") == current.identity and original.protected() == data.get("protected")):
                 return True
         import copy
@@ -199,8 +200,15 @@ class PersistentState:
         vals = values(book)
         for row in rows:
             row["value"] = json.loads(row["value"])
+            accepted_clear = (row["field"] == "subtitle" and row["value"] == ""
+                              and vals["subtitle"] is None and any(
+                                  c["item_id"] == item_id and c["field"] == "subtitle"
+                                  and c["accepted"] and c["proposed"] == ""
+                                  and c["identity_digest"] == identity(book, "subtitle")
+                                  and c["status"] == "observed_in_abs" for c in self.corrections(audit_id)))
             row["valid"] = (row["identity_digest"] == ident or self.expected_transition(
-                audit_id, item_id, self.book(row["audit_id"], item_id))) and row["value_digest"] == digest(vals[row["field"]])
+                audit_id, item_id, self.book(row["audit_id"], item_id))) and (
+                    row["value_digest"] == digest(vals[row["field"]]) or accepted_clear)
         if history:
             return rows
         result = {}
@@ -382,9 +390,9 @@ class PersistentState:
                            (audit_id, book.id, row["field"]))
                 db.execute("INSERT INTO findings(audit_id,item_id,field,kind,current,proposed,confidence,reason,evidence,actionable,target) VALUES(?,?,?,'confirmed_target',?,?,'human',?,'{}',1,?)",
                            (audit_id, book.id, row["field"], row["current"], row["proposed"], row["evidence"], row["proposed"]))
-            elif row["abs_observed"] is None and values(book).get(row["field"]) == json.loads(
-                row["proposed"]
-            ):
+            elif row["abs_observed"] is None and (target_observed(
+                row["field"], json.loads(row["proposed"]), values(book).get(row["field"]))
+                if row["accepted"] else values(book).get(row["field"]) == json.loads(row["proposed"])):
                 db.execute(
                     "UPDATE corrections SET abs_observed=?,updated=?, status=CASE WHEN ? THEN 'observed_in_abs' ELSE status END WHERE id=?",
                     (timestamp(), timestamp(), book.is_audio, row["id"]),

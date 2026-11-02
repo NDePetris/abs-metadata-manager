@@ -18,7 +18,9 @@ from .models import Book, payload
 
 
 class AdapterError(RuntimeError):
-    pass
+    def __init__(self, message, diagnostic=None):
+        super().__init__(message)
+        self.diagnostic = diagnostic
 
 
 class InventoryChanged(AdapterError):
@@ -63,7 +65,8 @@ class CliAdapter:
             if flag in args:
                 target[key] = identifier(args[args.index(flag) + 1], self.settings.token)
         env = dict(os.environ, ABS_SERVER=self.server, ABS_TOKEN=self.settings.token, ABS_DEBUG="0")
-        for attempt in range(1, (3 if readonly else 1) + 1):
+        attempts = 3 if readonly and args[:1] != ["metadata"] else 1
+        for attempt in range(1, attempts + 1):
             self._pace()
             record = {"operation": operation, **target, "attempt": attempt, "retry_count": attempt - 1,
                       "duration": 0.0, "exit_code": None, "category": "pending", "state": "requesting"}
@@ -92,6 +95,8 @@ class CliAdapter:
                         category = "connection_reset"
                     elif re.search(r"ETIMEDOUT|timed out|timeout", detail, re.IGNORECASE):
                         category = "timeout"
+                    elif re.search(r"ECONNREFUSED|ENOTFOUND|EAI_AGAIN", detail, re.IGNORECASE):
+                        category = "connection_reset"
                     else:
                         category = "cli_error"
                 else:
@@ -110,7 +115,7 @@ class CliAdapter:
                 category = "connection_reset"
             except OSError:
                 category = "executable_error"
-            retry = readonly and attempt < 3 and category in {"timeout", "connection_reset", "transient_http"}
+            retry = readonly and attempt < attempts and category in {"timeout", "connection_reset", "transient_http"}
             record.update(duration=round(time.monotonic() - started, 3), exit_code=code, category=category,
                           stderr=detail, state="retrying" if retry else "ok" if category == "ok" else "failed")
             event(self.log, **record)
@@ -129,7 +134,7 @@ class CliAdapter:
                 message += " A submitted update may have reached the server; reconcile History."
             elif readonly:
                 message += " Read-only request; saved audit progress is retained."
-            raise AdapterError(message) from None
+            raise AdapterError(message, record.copy()) from None
 
     def probe(self) -> dict:
         self.version = self._run(["--version"], parse=False)
@@ -259,7 +264,8 @@ class PublicMetadataTransport:
         if source not in ("openlibrary", "googlebooks"):
             raise ValueError("Unsupported source.")
         if source == "googlebooks" and not self.google_key:
-            raise AdapterError("Google Books requires a configured API key; ABS and Open Library need none.")
+            raise AdapterError("Google Books requires a configured API key; ABS and Open Library need none.",
+                               {"category": "configuration"})
         url = {"openlibrary": "https://openlibrary.org/search.json",
                "googlebooks": "https://www.googleapis.com/books/v1/volumes"}[source]
         params = dict(query)

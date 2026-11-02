@@ -5,11 +5,12 @@ import os
 import streamlit as st
 
 from . import preferences
-from .adapter import PublicMetadataTransport
+from .adapter import AdapterError, PublicMetadataTransport
+from .diagnostics import provider_failure
 from .locking import BusyError, operation_lock
 from .models import digest, review_fields
-from .sources import AbsSource, PublicSource
-from .verification import can_copy_reference, reference_values
+from .sources import RECORDING_PROVIDERS, AbsSource, PublicSource
+from .verification import can_copy_reference, contributor_comparison, reference_values
 from .verification_workflow import run_verification, start_verification
 
 
@@ -19,6 +20,31 @@ def source_for(source_id, adapter):
             raise ValueError("Connect to the original server first.")
         return AbsSource(adapter, source_id[4:])
     return PublicSource(source_id, PublicMetadataTransport(os.getenv("GOOGLE_BOOKS_API_KEY", "")))
+
+
+def discover_providers(store, adapter):
+    """Called exclusively by explicit connection/refresh actions."""
+    previous = st.session_state.get("provider_discovery", {})
+    state = {"server": adapter.server, "status": "available",
+             "providers": previous.get("providers", []) if previous.get("server") == adapter.server else []}
+    try:
+        with operation_lock(store.path):
+            state["providers"] = adapter.metadata_providers()
+    except (AdapterError, ValueError, KeyError, TypeError) as exc:
+        state.update(status="failed", diagnostic=provider_failure(exc, "ABS", "metadata providers"))
+    st.session_state["provider_discovery"] = state
+    st.session_state["providers"] = state["providers"]
+    return state
+
+
+def source_label(source):
+    if source.startswith("abs:"):
+        provider = source[4:]
+        found = next((p for p in st.session_state.get("providers", []) if p["value"] == provider), {})
+        name = found.get("text") or provider.title()
+        return f"ABS · {name} · " + ("recording" if provider in RECORDING_PROVIDERS else "bibliographic")
+    return {"openlibrary": "Open Library · direct · bibliographic",
+            "googlebooks": "Google Books · direct · bibliographic"}.get(source, source)
 
 
 def display(value):
@@ -203,15 +229,32 @@ def reference_area(store, audit, item, scope):
                     st.session_state[scope]["manual"] = False
                     st.rerun()
         with st.popover("Search / Refine"):
-            providers = st.session_state.get("providers", [])
+            adapter = st.session_state.get("adapter")
+            discovery = st.session_state.get("provider_discovery", {})
+            if not adapter or discovery.get("server") != adapter.server:
+                discovery = {}
+            if st.button("Discover / Refresh ABS Providers", key=scope + ":discover", disabled=adapter is None):
+                discover_providers(store, adapter)
+                st.rerun()
+            st.caption("ABS providers: " + discovery.get("status", "not discovered"))
+            if discovery.get("diagnostic"):
+                st.warning(discovery["diagnostic"]["summary"])
+                if discovery.get("providers"):
+                    st.caption("Showing previously discovered providers; refresh failed.")
+                with st.expander("Safe discovery diagnostic"):
+                    st.json(discovery["diagnostic"])
+            providers = discovery.get("providers", [])
             choices = ["abs:" + p["value"] for p in providers] + ["openlibrary", "googlebooks"]
             preferred = preferences.load().get("source")
             source = st.selectbox("Source", choices, index=choices.index(preferred) if preferred in choices else 0,
-                                  key=scope + ":source")
+                                  key=scope + ":source", format_func=source_label)
+            missing_key = source == "googlebooks" and not os.getenv("GOOGLE_BOOKS_API_KEY", "")
+            if missing_key:
+                st.caption("Google Books requires an independent GOOGLE_BOOKS_API_KEY; not configured.")
             title = st.text_input("Refine title / ASIN or public query", key=scope + ":query")
             with st.container(horizontal=True):
-                search = st.button("Search", key=scope + ":search")
-                another = st.button("Search another source", key=scope + ":another")
+                search = st.button("Search", key=scope + ":search", disabled=missing_key)
+                another = st.button("Search another source", key=scope + ":another", disabled=missing_key)
             if search or another:
                 st.session_state[scope]["manual"] = False
                 preferences.save({**preferences.load(), "source": source})
@@ -220,6 +263,8 @@ def reference_area(store, audit, item, scope):
                 rid = start_verification(store, aid, src, [iid], refresh=True, query_overrides=overrides)
                 with st.spinner("Searching…"):
                     run_verification(store, rid, src, limit=1)
+                latest = next(l for l in store.verification_evidence(aid, iid) if l["source"] == src.id)
+                st.session_state[scope]["search_result"] = latest
                 decisions = store.candidate_decisions(aid, iid)
                 new_candidates = [c for lookup in store.verification_evidence(aid, iid)
                                   if lookup["source"] == src.id and lookup["state"] == "ok"
@@ -232,6 +277,16 @@ def reference_area(store, audit, item, scope):
         if st.button("Continue manually", key=scope + ":manual"):
             st.session_state[scope]["manual"] = True
             st.rerun()
+    result = st.session_state[scope].get("search_result") or next(iter(item.get("lookups", [])), None)
+    if result:
+        name = source_label(result["source"])
+        if result["state"] == "unavailable":
+            st.warning(name + " search failed: " + result["error"])
+            with st.expander("Safe search diagnostic"):
+                st.json(result.get("diagnostic", {"summary": result["error"]}))
+        else:
+            st.caption(name + " · " + (f"Found {len(result['candidates'])} candidates" if result["candidates"]
+                                       else "No matching candidates"))
     return None if st.session_state[scope].get("manual") else match
 
 
@@ -307,6 +362,8 @@ def verification_view(store, inventory):
                     st.caption(assessment["status"] + " · " + human)
                 with ref, st.container(gap=None):
                     st.write(display(reference[field]) if field in reference else "Not supplied")
+                    if field == "narrators" and field in reference:
+                        st.caption(contributor_comparison(assessment["value"], reference[field]))
                     if match and field in reference:
                         copied = (lambda current, value=reference[field]: {**current, **value}
                                   if isinstance(value, dict) else value) if field == "identifiers" else reference[field]

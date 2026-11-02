@@ -10,7 +10,7 @@ from .adapter import AdapterError
 from .locking import operation_lock
 from .models import FIELDS, compact, digest
 from .store import now
-from .verification import comparable
+from .verification import comparable, fields_equal
 
 
 def start_verification(store, audit_id, source, item_ids, *, refresh=False, query_overrides=None):
@@ -95,8 +95,10 @@ def run_verification(store, run_id, source, *, progress=lambda *args: None, canc
                     data.update(source.search(query))
                     if not data["candidates"]:
                         data["state"] = "no_match"
-                except (AdapterError, ValueError, KeyError, TypeError):
-                    data.update(state="unavailable", error="Provider unavailable or response failed schema validation.")
+                except (AdapterError, ValueError, KeyError, TypeError) as exc:
+                    from .diagnostics import provider_failure
+                    diagnostic = provider_failure(exc, source.id, "metadata search")
+                    data.update(state="unavailable", error=diagnostic["summary"], diagnostic=diagnostic)
                 with store.connect() as db:
                     cursor = db.execute("INSERT INTO verification_lookups(cache_key,source,scope,captured,data) "
                                         "VALUES(?,?,?,?,?)", (task["cache_key"], source.id, source.scope,
@@ -140,7 +142,7 @@ def propose_discrepancy(store, audit_id, item_id, field, candidate_id):
         raise ValueError("Candidate has no evidence for this field.")
     target = item["values"][field]
     before = store.book(audit_id, item_id).values[field]
-    equal = comparable(field, target) == comparable(field, before)
+    equal = fields_equal(field, target, before)
     if field == "series":
         equal = equal and comparable("series_position", [s["sequence"] for s in target]) == comparable(
             "series_position", [s["sequence"] for s in before])

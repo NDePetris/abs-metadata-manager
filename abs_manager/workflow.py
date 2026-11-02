@@ -6,12 +6,61 @@ from collections.abc import Callable
 from .adapter import Adapter, AdapterError, CliAdapter, InventoryChanged, inventory, membership
 from .diagnostics import event
 from .locking import operation_lock
-from .models import Book, digest, payload
+from .models import Book, digest, payload, result_matches, target_observed
 from .store import Store
 
 
 class SafetyError(RuntimeError):
     pass
+
+
+def operation_comparison(data, observed):
+    """Compact intent and actual differences; no inference about journal state."""
+    rows = []
+    try:
+        book = Book(observed) if observed else None
+    except (ValueError, KeyError, TypeError):
+        book = None
+
+    def show(field, value, actual=False):
+        if field == "subtitle" and data.get("changes", {}).get(field) == "" and value in (None, ""):
+            return "Cleared (ABS returned null)" if actual and value is None else "Cleared"
+        return json.dumps(value, ensure_ascii=False)
+
+    before, after = data.get("before", {}), data.get("after", {})
+    for field in sorted(set(before) | set(after)):
+        actual = book.values.get(field) if book else None
+        equal = book is not None and (target_observed(field, after.get(field), actual)
+                                     if field in data.get("changes", {}) else after.get(field) == actual)
+        if field in data.get("changes", {}) or not equal:
+            rows.append({"Field": field.capitalize(), "Before": show(field, before.get(field)),
+                         "Intended": show(field, after.get(field)),
+                         "Observed": show(field, actual, True) if book else "Not observed",
+                         "Comparison": ("Semantically equivalent" if actual != after.get(field) else "Matches")
+                         if equal else "Material difference" if book else "Not observed"})
+
+    def differences(prefix, expected, actual):
+        if isinstance(expected, dict) and isinstance(actual, dict):
+            for key in sorted(expected.keys() | actual.keys()):
+                differences(prefix + "." + key, expected.get(key, "[not present]"),
+                            actual.get(key, "[not present]"))
+        elif isinstance(expected, list) and isinstance(actual, list):
+            for index in range(max(len(expected), len(actual))):
+                differences(f"{prefix}[{index}]", expected[index] if index < len(expected) else "[not present]",
+                            actual[index] if index < len(actual) else "[not present]")
+        elif expected != actual:
+            def short(value):
+                text = json.dumps(value, ensure_ascii=False)
+                return text if len(text) <= 240 else text[:240] + "… (see Advanced)"
+            rows.append({"Field": prefix, "Before": short(expected), "Intended": short(expected),
+                         "Observed": short(actual), "Comparison": "Material difference"})
+
+    if book:
+        differences("Identity", data.get("identity"), book.identity)
+        differences("Protected", data.get("protected"), book.protected())
+        if book.raw.get("isMissing") or book.raw.get("isInvalid") or not book.is_audio:
+            rows.append({"Field": "Media validity", "Comparison": "Material difference"})
+    return rows
 
 
 def library_identity(library: dict) -> dict:
@@ -167,8 +216,11 @@ def guard(book: Book, identity: dict, values: dict):
         raise SafetyError("Live item is missing, invalid, or not an audiobook.")
 
 
-def verify(book: Book, data: dict, values: dict):
-    guard(book, data["identity"], values)
+def verify(book: Book, data: dict, values: dict, *, intended=False):
+    expected = values
+    if intended and result_matches(values, book.values, data["changes"]):
+        expected = book.values
+    guard(book, data["identity"], expected)
     if book.protected() != data["protected"]:
         raise SafetyError("Unrelated live metadata/media changed. Reconcile and inspect the book.")
 
@@ -217,15 +269,17 @@ class Workflow:
         item_id = data["identity"]["id"]
         # Durable FULL-synchronous commit happens before a subprocess can send PATCH.
         operation_id = self.store.record(server, library, item_id, action, "prepared", data)
+        observed = None
         try:
             self.adapter.update(item_id, data["changes"])
             self.store.transition(operation_id, "applied", "Update returned; verification pending.")
             observed = Book(self.adapter.item(item_id))
-            verify(observed, data, data["after"])
+            verify(observed, data, data["after"], intended=True)
             self.store.transition(operation_id, "verified", "Requested fields and unrelated metadata verified.",
                                   observed.raw, consume=data.get("finding_ids", ()), parent=data.get("parent"))
         except BaseException as exc:
-            self.store.transition(operation_id, "uncertain", "Write or verification interrupted. Do not retry; reconcile.")
+            self.store.transition(operation_id, "uncertain", "Write or verification interrupted. Do not retry; reconcile.",
+                                  observed.raw if observed else None)
             if not isinstance(exc, Exception):
                 raise
             raise SafetyError(f"Operation {operation_id} is uncertain. Batch stopped; reconcile in History.") from exc
@@ -242,7 +296,7 @@ class Workflow:
             data = row["data"]
             observed = Book(self.adapter.item(row["item_id"]))
             try:
-                verify(observed, data, data["after"])
+                verify(observed, data, data["after"], intended=True)
             except SafetyError:
                 try:
                     verify(observed, data, data["before"])
@@ -268,7 +322,9 @@ class Workflow:
         data = row["data"]
         changes = {field: data["before"][field] for field in data["changes"]}
         result = {"server": row["server"], "library": row["library"], "parent": operation_id,
-                  "identity": data["identity"], "before": data["after"], "after": data["before"],
+                  "identity": data["identity"],
+                  "before": Book(row["observed"]).values if row["observed"] else data["after"],
+                  "after": data["before"],
                   "changes": changes, "payload": payload(changes, restoring=True), "protected": data["protected"]}
         result["digest"] = digest(result)
         return result

@@ -70,6 +70,49 @@ def comparable(field, value):
     return canon(value) if isinstance(value, str) else value
 
 
+def contributor_comparison(left, right):
+    """Compare a display credit only against complete, separately known names.
+
+    Never infer people by splitting on commas. Require one unique complete
+    partition, preserving punctuation within the known names and all input data.
+    """
+    a, b = names(left), names(right)
+    if not a or not b:
+        return "Missing contributor information"
+    if comparable("narrators", a) == comparable("narrators", b):
+        return "Equivalent people"
+    if len(a) > 1 and len(b) == 1:
+        a, b = b, a
+    if len(a) != 1 or len(b) < 2 or len(b) > 16:
+        return "Different contributors"
+    tokens = lambda text: re.findall(r"\w+", canon(text))
+    known = [tokens(name) for name in b]
+    text = tokens(a[0])
+    if len({tuple(k) for k in known}) != len(known) or any(len(k) < 2 for k in known):
+        return "Ambiguous combined string"
+
+    def partitions(offset, remaining):
+        if not remaining:
+            return int(offset == len(text))
+        count = 0
+        for i in remaining:
+            end = offset + len(known[i])
+            if text[offset:end] == known[i]:
+                count += partitions(end, remaining - {i})
+                if count > 1:
+                    return count
+        return count
+
+    count = partitions(0, set(range(len(known))))
+    return "Equivalent people · formatting differs" if count == 1 else "Ambiguous combined string"
+
+
+def fields_equal(field, left, right):
+    if field == "narrators":
+        return contributor_comparison(left, right).startswith("Equivalent people")
+    return comparable(field, left) == comparable(field, right)
+
+
 def candidate(raw: dict, source: str, url: str = "", *, work_only=False) -> dict:
     """Normalize ABS/provider fields without discarding the provider's original record."""
     for key in ("title", "subtitle", "language", "isbn", "asin", "url"):
@@ -156,7 +199,7 @@ def match(book: Book, item: dict) -> dict:
     signals, contradictions = [], []
     for field in ("title", "authors", "series", "series_position", "narrators"):
         if saved.get(field) and other.get(field):
-            equal = comparable(field, saved[field]) == comparable(field, other[field])
+            equal = fields_equal(field, saved[field], other[field])
             if field == "title":
                 series_name = saved["series"][0]["name"] if len(saved["series"]) == 1 else ""
                 equal = embedded_title_key(saved[field], series_name) == embedded_title_key(other[field], series_name)
@@ -315,7 +358,7 @@ def assess(book: Book, evidence: list[dict] = (), *, selected: str | None = None
                                    "lookups": [{k: lookup[k] for k in ("query", "captured") if k in lookup}
                                                for lookup in usable if any(c["id"] == external["candidate_id"]
                                                                            for c in lookup.get("candidates", []))]})
-                equal = comparable(field, value) == comparable(field, other)
+                equal = fields_equal(field, value, other)
                 recording_field = field in ("subtitle", "narrators", "translators", "series_position", "identifiers") and book.is_audio
                 human_recording = chosen and not external["candidate"].get("work_only")
                 if not recording_field or external["level"] == "recording" or human_recording:

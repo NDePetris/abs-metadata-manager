@@ -46,3 +46,29 @@ def stderr_summary(stderr: str | bytes | None, secret: str) -> str:
 
 def event(logger: logging.Logger, **values):
     logger.info(json.dumps(values, ensure_ascii=True, sort_keys=True))
+
+
+def provider_failure(exc, provider, operation):
+    """Only categorized adapter data and recognized vocabulary leave this boundary."""
+    record = getattr(exc, "diagnostic", None) or {}
+    category = record.get("category", "invalid_schema")
+    allowed = {"authorization", "transient_http", "permanent_http", "timeout", "connection_reset",
+               "cli_error", "executable_error", "malformed_response", "invalid_schema", "configuration"}
+    if category not in allowed:
+        category = "cli_error"
+    detail = stderr_summary(record.get("stderr", ""), "")
+    status = re.search(r"\b[1-5]\d\d\b", detail)
+    reached = "HTTP response received; origin may be ABS or upstream" if status else (
+        "Response received" if category in {"malformed_response", "invalid_schema"} else "Not established")
+    summary = {"authorization": "authorization error; check ABS and provider credentials/configuration",
+               "transient_http": "rate limited or upstream unavailable",
+               "permanent_http": "HTTP request failed",
+               "timeout": "timeout; ABS/upstream completion unknown",
+               "connection_reset": "connection failed", "cli_error": "CLI command failed",
+               "executable_error": "CLI could not start",
+               "malformed_response": "provider returned malformed JSON",
+               "invalid_schema": "provider returned an unsupported response",
+               "configuration": "requires authentication/configuration; independent Google Books API key missing"}[category]
+    return {"provider": provider, "operation": operation, "category": category,
+            "summary": summary, "detail": detail, "http_status": status.group(0) if status else None,
+            "exit_code": record.get("exit_code"), "reached_abs": reached}

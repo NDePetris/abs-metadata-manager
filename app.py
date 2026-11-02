@@ -13,12 +13,13 @@ from abs_manager.locking import BusyError, operation_lock
 from abs_manager.models import digest
 from abs_manager.sample import sample_audit
 from abs_manager.store import Store
-from abs_manager.verification_ui import verification_view
+from abs_manager.verification_ui import discover_providers, verification_view
 from abs_manager.workflow import (
     SafetyError,
     Workflow,
     confirmation,
     import_previous,
+    operation_comparison,
     resume_unavailable,
     run_audit,
 )
@@ -91,7 +92,7 @@ def settings_view(store):
             with operation_lock(store.path), st.spinner("Checking CLI commands and reading libraries…"):
                 adapter = CliAdapter(Settings(server, token or preferences.credential(server), executable, interval, timeout))
                 result = adapter.probe()
-                st.session_state["providers"] = adapter.metadata_providers()
+            discover_providers(store, adapter)
             if remember and token:
                 preferences.credential(server, token)
             preferences.save({**preferences.load(), "server": adapter.server, "executable": executable})
@@ -303,10 +304,9 @@ def history_view(store):
         row = store.operation(oid)
         data = row["data"]
         st.write(f"**{row['state']}** · {row['message']}")
-        st.json({"identity": data.get("identity"), "before": data.get("before"),
-                 "intended_after": data.get("after"), "payload": data.get("payload")})
-        with st.expander("Persisted pre-update and observed result"):
-            st.json({"pre_update": data.get("pre_update_raw"), "observed": row["observed"]})
+        st.dataframe(operation_comparison(data, row["observed"]), hide_index=True, width="stretch")
+        with st.expander("Advanced / Raw operation JSON"):
+            st.json({"intent": data, "observed": row["observed"]})
         adapter = st.session_state.get("adapter")
         connected = adapter is not None and adapter.server == row["server"]
         if row["state"] in ("prepared", "applied", "uncertain"):

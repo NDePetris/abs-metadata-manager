@@ -67,6 +67,10 @@ st.session_state["adapter"] = api
 st.session_state["reconnect_checked"] = True
 st.session_state["providers"] = [{"value": "audible"}, {"value": "audnexus"}]
 
+st.session_state["provider_discovery"] = {"server": api.server, "status": "available",
+                                        "providers": st.session_state["providers"]}
+api.metadata_providers = lambda: st.session_state["providers"]
+
 from abs_manager import verification_ui
 from app import main
 
