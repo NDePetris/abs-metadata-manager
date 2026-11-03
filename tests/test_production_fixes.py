@@ -138,6 +138,9 @@ def test_cli_failure_persisted_safely(setup, monkeypatch, stderr, category):
         calls.append(args)
         return SimpleNamespace(returncode=2, stderr=stderr, stdout="")
     monkeypatch.setattr(subprocess, "run", run)
+    # Keep regression coverage for categorized CLI errors propagated by sources;
+    # production metadata search now bypasses that CLI path with one direct GET.
+    monkeypatch.setattr(adapter, "_metadata_search_json", lambda *args: adapter._run(["metadata", "search"]))
     source = AbsSource(adapter, "audible")
     rid = start_verification(store, aid, source, ["current-id"])
     run_verification(store, rid, source)
@@ -152,7 +155,7 @@ def test_cli_failure_persisted_safely(setup, monkeypatch, stderr, category):
 def test_search_schemas(setup, monkeypatch, response, state):
     store, api, aid = setup
     adapter = CliAdapter(Settings(api.server, "secret", "fake-cli", .1, 3))
-    monkeypatch.setattr(adapter, "_run", lambda args: response)
+    monkeypatch.setattr(adapter, "_metadata_search_json", lambda *args: response)
     source = AbsSource(adapter, "audible")
     run_verification(store, start_verification(store, aid, source, ["current-id"]), source)
     assert store.verification_evidence(aid, "current-id")[0]["state"] == state

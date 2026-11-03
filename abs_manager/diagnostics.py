@@ -48,6 +48,32 @@ def event(logger: logging.Logger, **values):
     logger.info(json.dumps(values, ensure_ascii=True, sort_keys=True))
 
 
+def response_shape(body: str | bytes) -> dict:
+    """Describe a response without retaining even a prefix, key, URL or value."""
+    result = {"length": len(body), "length_unit": "bytes" if isinstance(body, bytes) else "characters"}
+    if isinstance(body, bytes):
+        if body.startswith(b"\x1f\x8b"):
+            return {**result, "kind": "gzip_bytes"}
+        try:
+            body = body.decode("utf-8")
+        except UnicodeDecodeError:
+            return {**result, "kind": "invalid_utf8"}
+    text = body.lstrip()
+    kind = ("empty" if not text else "utf8_bom" if text.startswith("\ufeff") else
+            "html_like" if re.match(r"(?is)<!doctype\s+html\b|<html\b", text) else
+            "markup_like" if text.startswith("<") else
+            "json_like_invalid" if text.startswith(("[", "{")) else "other_non_json")
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError as exc:
+        # Never retain exc.doc, exc.msg, offending characters or surrounding text.
+        return {**result, "kind": kind, "error_position": exc.pos,
+                "error_line": exc.lineno, "error_column": exc.colno}
+    json_type = ("array" if isinstance(value, list) else "object" if isinstance(value, dict) else "scalar")
+    return {**result, "kind": "valid_json", "json_type": json_type,
+            **({"count": len(value)} if isinstance(value, (list, dict)) else {})}
+
+
 def provider_failure(exc, provider, operation):
     """Only categorized adapter data and recognized vocabulary leave this boundary."""
     record = getattr(exc, "diagnostic", None) or {}
@@ -59,16 +85,32 @@ def provider_failure(exc, provider, operation):
     detail = stderr_summary(record.get("stderr", ""), "")
     status = re.search(r"\b[1-5]\d\d\b", detail)
     reached = "HTTP response received; origin may be ABS or upstream" if status else (
-        "Response received" if category in {"malformed_response", "invalid_schema"} else "Not established")
+        "CLI stdout received; ABS HTTP status/content type unknown" if category == "malformed_response" else
+        "Response received" if category == "invalid_schema" else "Not established")
     summary = {"authorization": "authorization error; check ABS and provider credentials/configuration",
                "transient_http": "rate limited or upstream unavailable",
                "permanent_http": "HTTP request failed",
                "timeout": "timeout; ABS/upstream completion unknown",
                "connection_reset": "connection failed", "cli_error": "CLI command failed",
                "executable_error": "CLI could not start",
-               "malformed_response": "provider returned malformed JSON",
+               "malformed_response": "CLI stdout is not valid JSON; exit 0 does not establish a JSON API response",
                "invalid_schema": "provider returned an unsupported response",
                "configuration": "requires authentication/configuration; independent Google Books API key missing"}[category]
-    return {"provider": provider, "operation": operation, "category": category,
+    diagnostic = {"provider": provider, "operation": operation, "category": category,
             "summary": summary, "detail": detail, "http_status": status.group(0) if status else None,
             "exit_code": record.get("exit_code"), "reached_abs": reached}
+    if record.get("transport") == "direct_get":
+        diagnostic["transport"] = "direct_get"
+        if category == "malformed_response":
+            diagnostic["summary"] = "metadata search returned a non-JSON HTTP body"
+    shape = record.get("response_shape", {})
+    safe_shape = {k: v for k, v in shape.items() if (
+        k in {"length", "error_position", "error_line", "error_column", "count"}
+        and type(v) is int and v >= 0) or (
+        k == "kind" and v in {"gzip_bytes", "invalid_utf8", "empty", "utf8_bom", "html_like",
+                              "markup_like", "json_like_invalid", "other_non_json", "valid_json"}) or (
+        k == "json_type" and v in {"array", "object", "scalar"}) or (
+        k == "length_unit" and v in {"bytes", "characters"})}
+    if safe_shape:
+        diagnostic["response_shape"] = safe_shape
+    return diagnostic
