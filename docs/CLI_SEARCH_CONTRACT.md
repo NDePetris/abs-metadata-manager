@@ -75,9 +75,10 @@ Run from the repository, with the app idle:
 
 Enter the exact base URL, provider, title/ASIN and author used by the working web
 UI. The key prompt is hidden; no stored key/config is read. This performs one GET
-under the workspace lock and prints only safe shape JSON. Redirects are reported,
+under the workspace lock and runs the same candidate normalization/identity pipeline,
+printing only counts and safe field/type/stage diagnostics. Redirects are reported,
 not followed. The diagnostic does not use browser cookies, netrc or environment
-proxy credentials. It reads at most 2 MB of decoded response and labels truncation.
+proxy credentials. Provider bodies remain in memory and are never printed or persisted by this script.
 Do not share keys, raw stdout, copied request headers or debug logs.
 
 For an exact official CLI comparison, use a **clean OS account or Windows Sandbox**

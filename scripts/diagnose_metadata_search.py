@@ -8,10 +8,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from abs_manager.adapter import AdapterError, CliAdapter, probe_metadata_search
+from abs_manager.adapter import AdapterError, CliAdapter
 from abs_manager.config import ROOT, Settings, detect_cli
 from abs_manager.diagnostics import provider_failure
 from abs_manager.locking import BusyError, operation_lock
+from abs_manager.sources import AbsSource
 
 
 def cli_profile():
@@ -51,7 +52,13 @@ def main():
     settings = Settings(server, token, detect_cli(), timeout=90)
     query = {"title": title, **({"author": author} if author else {})}
     with operation_lock(os.getenv("ABS_MM_DB", str(ROOT / "data" / "metadata.sqlite3"))):
-        print(json.dumps(probe_metadata_search(settings, provider, query), sort_keys=True))
+        try:
+            result = AbsSource(CliAdapter(settings), provider).search(query)
+            print(json.dumps({"transport": "direct_get", "stage": "candidate_pipeline", "state": result.get("state", "ok"),
+                              "usable_count": len(result["candidates"]), "total_count": len(result["raw"]),
+                              "candidate_diagnostics": result.get("candidate_diagnostics", [])}, sort_keys=True))
+        except AdapterError as exc:
+            print(json.dumps(provider_failure(exc, "abs:" + provider, "metadata search"), sort_keys=True))
         if args.with_cli:
             try:
                 command = ["metadata", "search", "--provider", provider, "--title", title]

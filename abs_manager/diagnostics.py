@@ -8,6 +8,26 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
+def data_type(value):
+    return ("null" if value is None else "boolean" if isinstance(value, bool) else
+            "string" if isinstance(value, str) else "object" if isinstance(value, dict) else
+            "array" if isinstance(value, list) else "number" if isinstance(value, (int, float)) else "unsupported")
+
+
+class CandidateError(ValueError):
+    """Structural context only. Call sites supply fixed field names, never provider keys/values."""
+
+    def __init__(self, field=None, expected="supported value", actual="unsupported", *, stage="normalization"):
+        super().__init__("Candidate processing failed; values withheld.")
+        self.structure = {"stage": stage, "field": field, "expected_type": expected, "actual_type": actual}
+
+    def safe_diagnostic(self, provider, index):
+        return {"provider": provider, "candidate_index": index,
+                "category": {"shape": "unsupported_candidate_shape", "normalization": "candidate_normalization",
+                             "identity": "candidate_identity", "persistence": "candidate_persistence"}[self.structure["stage"]],
+                **self.structure}
+
+
 def local_log(path: Path) -> logging.Logger:
     path = path.resolve()
     logger = logging.getLogger(f"abs.audit.{path}")
@@ -76,6 +96,9 @@ def response_shape(body: str | bytes) -> dict:
 
 def provider_failure(exc, provider, operation):
     """Only categorized adapter data and recognized vocabulary leave this boundary."""
+    if isinstance(exc, CandidateError):
+        return {**exc.safe_diagnostic(provider, None), "operation": operation,
+                "summary": "candidate could not be processed; values withheld"}
     record = getattr(exc, "diagnostic", None) or {}
     category = record.get("category", "invalid_schema")
     allowed = {"authorization", "transient_http", "permanent_http", "timeout", "connection_reset",
@@ -101,6 +124,8 @@ def provider_failure(exc, provider, operation):
             "exit_code": record.get("exit_code"), "reached_abs": reached}
     if record.get("transport") == "direct_get":
         diagnostic["transport"] = "direct_get"
+        if category in ("malformed_response", "invalid_schema"):
+            diagnostic["stage"] = "http_json" if category == "malformed_response" else "response_schema"
         if category == "malformed_response":
             diagnostic["summary"] = "metadata search returned a non-JSON HTTP body"
     shape = record.get("response_shape", {})

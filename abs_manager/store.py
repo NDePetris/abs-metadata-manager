@@ -288,7 +288,7 @@ class Store(PersistentState):
             key = (data["source"], data["scope"])
             if key not in latest:
                 latest[key] = data
-            elif latest[key]["state"] == "unavailable" and data["state"] in ("ok", "no_match") and data[
+            elif latest[key]["state"] == "unavailable" and data["state"] in ("ok", "partial", "no_match") and data[
                     "query"] == latest[key]["query"]:
                 latest[key].setdefault("previous_success", data)
         return list(latest.values())
@@ -345,9 +345,23 @@ class Store(PersistentState):
             for field, details in report["fields"].items():
                 details["decision"] = report["human_decisions"].get(field)
             from .models import review_fields
+            from .persistent_state import identity
             relevant = [report["fields"][f] for f in review_fields(book.is_audio)]
-            pending = [d for d in relevant if not (d["decision"] and d["decision"]["valid"]
-                       and d["decision"]["decision"] == "confirmed")]
+            # Confirmed targets are human acceptance even before application.
+            # A generic correction-needed decision without that exact durable
+            # accepted target is still unfinished. Keep this rule in the report.
+            corrections = self.corrections(audit_id)
+            for field in review_fields(book.is_audio):
+                details = report["fields"][field]
+                d = details["decision"]
+                details["review_accepted"] = bool(d and d["valid"] and (
+                    d["decision"] == "confirmed" or d["decision"] == "correction_needed" and any(
+                        c["item_id"] == book.id and c["field"] == field and c["accepted"]
+                        and c["audit_id"] == d["audit_id"] and c["created"] >= d["created"]
+                        and c["identity_digest"] == identity(book, field) and c["current"] == d["value"]
+                        and c["status"] in ("pending", "edited_in_calibre", "verified_in_calibre")
+                        for c in corrections)))
+            pending = [d for d in relevant if not d["review_accepted"]]
             if any(d["decision"] and d["decision"]["valid"] and d["decision"]["decision"] == "correction_needed" for d in pending):
                 report["review_status"] = "Correction needed"
             elif pending and report["match_classification"] in ("different_recording", "wrong_work"):

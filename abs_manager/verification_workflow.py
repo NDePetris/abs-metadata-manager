@@ -93,16 +93,27 @@ def run_verification(store, run_id, source, *, progress=lambda *args: None, canc
                         "state": "ok", "candidates": []}
                 try:
                     data.update(source.search(query))
-                    if not data["candidates"]:
+                    if not data["candidates"] and data["state"] == "ok":
                         data["state"] = "no_match"
                 except (AdapterError, ValueError, KeyError, TypeError) as exc:
                     from .diagnostics import provider_failure
                     diagnostic = provider_failure(exc, source.id, "metadata search")
                     data.update(state="unavailable", error=diagnostic["summary"], diagnostic=diagnostic)
+                try:
+                    serialized = compact(data)
+                except (ValueError, TypeError, KeyError):
+                    # JSON received from HTTP is serializable. Keep a distinct safe
+                    # boundary for unsupported custom source/normalizer outputs.
+                    data = {k: data[k] for k in ("source", "scope", "query", "captured")}
+                    data.update(state="unavailable", candidates=[], error="Candidate persistence failed.",
+                                diagnostic={"provider": source.id, "category": "candidate_persistence",
+                                            "stage": "persistence", "field": None,
+                                            "expected_type": "JSON serializable data", "actual_type": "unsupported"})
+                    serialized = compact(data)
                 with store.connect() as db:
                     cursor = db.execute("INSERT INTO verification_lookups(cache_key,source,scope,captured,data) "
                                         "VALUES(?,?,?,?,?)", (task["cache_key"], source.id, source.scope,
-                                                              data["captured"], compact(data)))
+                                                              data["captured"], serialized))
                     db.execute("UPDATE verification_tasks SET lookup_id=? WHERE run_id=? AND item_id=?",
                                (cursor.lastrowid, run_id, task["item_id"]))
                 done += 1

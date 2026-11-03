@@ -155,7 +155,16 @@ class LocalABS(BaseHTTPRequestHandler):
         self.reply({"updated": True, "libraryItem": self.server.book})
 
 
-def test_official_cli_metadata_search_get_only(tmp_path):
+@pytest.fixture
+def clean_cli_profile():
+    # The executable uses Windows' known profile folder; HOME overrides and
+    # monkeypatching the Python config reader cannot isolate its saved tokens.
+    from scripts.diagnose_metadata_search import cli_profile
+    if (cli_profile() / ".abs-cli" / "config.json").exists():
+        pytest.skip("Official binary requires a clean OS profile; personal config was not opened")
+
+
+def test_official_cli_metadata_search_get_only(tmp_path, clean_cli_profile):
     from urllib.parse import parse_qs, urlsplit
 
     from abs_manager.sources import AbsSource
@@ -206,7 +215,7 @@ def test_official_cli_metadata_search_get_only(tmp_path):
         thread.join(3)
 
 
-def test_official_cli_against_local_http_simulator(tmp_path):
+def test_official_cli_against_local_http_simulator(tmp_path, clean_cli_profile):
     executable = detect_cli()
     if not Path(executable).is_file():
         pytest.skip("Install official abs-cli 1.2.0 to run its local protocol smoke test")
@@ -244,7 +253,7 @@ def test_official_cli_against_local_http_simulator(tmp_path):
         thread.join(3)
 
 
-def test_official_cli_transient_reads_resume_without_patch(tmp_path, monkeypatch):
+def test_official_cli_transient_reads_resume_without_patch(tmp_path, monkeypatch, clean_cli_profile):
     executable = detect_cli()
     if not Path(executable).is_file():
         pytest.skip("Install official abs-cli 1.2.0 for the local retry/resume protocol test")

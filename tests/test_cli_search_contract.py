@@ -104,7 +104,7 @@ def test_explicit_probe_is_one_get_no_redirect_or_credential_output(monkeypatch,
         adapter = CliAdapter(settings)
         messages = []
         adapter.log = SimpleNamespace(info=messages.append)
-        if status == 200 and body.startswith(b'[{"title"'):
+        if status == 200 and body in (b'[{"title":"synthetic-secret"}]', b'[null]'):
             assert len(adapter.metadata_search("audible", {"title": "Crossroads of Twilight", "author": "Robert Jordan"})) == 1
         else:
             expected = ("authorization" if status == 401 else "transient_http" if status in (429, 503)

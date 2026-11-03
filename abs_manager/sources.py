@@ -4,7 +4,8 @@ from __future__ import annotations
 from typing import Protocol
 from urllib.parse import urlencode
 
-from .models import Book
+from .diagnostics import CandidateError, data_type
+from .models import Book, compact
 from .verification import candidate
 
 RECORDING_PROVIDERS = frozenset(("audnexus", "audible", *("audible." + region for region in
@@ -35,18 +36,37 @@ class AbsSource:
 
     def search(self, query):
         response = self.adapter.metadata_search(self.provider, query)
-        candidates = []
-        for raw in response:
-            # ABS BookFinder normalizes provider duration to minutes, saved media is seconds.
-            normalized = dict(raw)
-            if isinstance(raw.get("duration"), (int, float)):
-                normalized["duration"] = raw["duration"] * 60
-            url = raw.get("url") or raw.get("link") or self.scope + "/api/search/books?" + urlencode(
-                {"provider": self.provider, **query})
-            item = candidate(normalized, self.id, url, work_only=self.provider not in RECORDING_PROVIDERS)
-            item["raw"] = raw
-            candidates.append(item)
-        return {"raw": response, "candidates": candidates}
+        candidates, diagnostics = [], []
+        for index, raw in enumerate(response):
+            stage = "normalization"
+            try:
+                if not isinstance(raw, dict):
+                    raise CandidateError(expected="object", actual=data_type(raw), stage="shape")
+                item = self.normalize(raw, query)
+                stage = "persistence"
+                compact(item)
+            except (ValueError, TypeError, KeyError) as exc:
+                failure = exc if isinstance(exc, CandidateError) else CandidateError(stage=stage)
+                diagnostics.append(failure.safe_diagnostic(self.id, index))
+            else:
+                candidates.append(item)
+        result = {"raw": response, "candidates": candidates}
+        if diagnostics:
+            result.update(state="partial" if candidates else "unavailable", candidate_diagnostics=diagnostics,
+                          error="Some candidates could not be processed." if candidates else "No candidates could be processed.",
+                          diagnostic=diagnostics[0])
+        return result
+
+    def normalize(self, raw, query):
+        # ABS BookFinder normalizes provider duration to minutes, saved media is seconds.
+        normalized = dict(raw)
+        if type(raw.get("duration")) in (int, float):
+            normalized["duration"] = raw["duration"] * 60
+        url = raw.get("url") or raw.get("link") or self.scope + "/api/search/books?" + urlencode(
+            {"provider": self.provider, **query})
+        item = candidate(normalized, self.id, url, work_only=self.provider not in RECORDING_PROVIDERS)
+        item["raw"] = raw
+        return item
 
 
 class PublicSource:

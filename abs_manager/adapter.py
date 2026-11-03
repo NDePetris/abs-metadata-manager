@@ -213,16 +213,14 @@ class CliAdapter:
         return sorted(providers, key=lambda p: (not any(
             x in (p["value"] + p.get("text", "")).lower() for x in ("audible", "audnexus")), p["value"]))
 
-    def metadata_search(self, provider: str, query: dict) -> list[dict]:
+    def metadata_search(self, provider: str, query: dict) -> list:
         if not provider or not query.get("title"):
             raise ValueError("Select a discovered provider and a nonempty title/ASIN.")
         response = self._metadata_search_json(provider, query)
         if not isinstance(response, list):
             raise AdapterError("Unexpected metadata search schema (expected candidate array).",
                                {"category": "invalid_schema", "stderr": "HTTP 200", "transport": "direct_get"})
-        if not all(isinstance(row, dict) for row in response):
-            raise AdapterError("Invalid metadata search candidate.",
-                               {"category": "invalid_schema", "stderr": "HTTP 200", "transport": "direct_get"})
+        # Source processing diagnoses each element and can retain partial results.
         return response
 
     def _metadata_search_json(self, provider: str, query: dict):
@@ -250,7 +248,7 @@ class CliAdapter:
             else:
                 try:
                     value = json.loads(response.content)
-                    if isinstance(value, list) and all(isinstance(row, dict) for row in value):
+                    if isinstance(value, list):
                         return value
                     category = "invalid_schema"
                     record["response_shape"] = response_shape(response.content)

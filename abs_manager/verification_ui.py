@@ -267,7 +267,7 @@ def reference_area(store, audit, item, scope):
                 st.session_state[scope]["search_result"] = latest
                 decisions = store.candidate_decisions(aid, iid)
                 new_candidates = [c for lookup in store.verification_evidence(aid, iid)
-                                  if lookup["source"] == src.id and lookup["state"] == "ok"
+                                  if lookup["source"] == src.id and lookup["state"] in ("ok", "partial")
                                   for c in lookup.get("candidates", []) if not (
                                       decisions.get(c["id"], {}).get("valid") and
                                       decisions[c["id"]]["decision"] in ("rejected", "wrong_book"))]
@@ -283,8 +283,13 @@ def reference_area(store, audit, item, scope):
         if result["state"] == "unavailable":
             st.warning(name + " search failed: " + result["error"])
             with st.expander("Safe search diagnostic"):
-                st.json(result.get("diagnostic", {"summary": result["error"]}))
+                st.json(result.get("candidate_diagnostics") or result.get("diagnostic", {"summary": result["error"]}))
         else:
+            if result["state"] == "partial":
+                st.warning(f"Partial results: {len(result['candidates'])} usable candidates; "
+                           f"{len(result['candidate_diagnostics'])} could not be processed. Review diagnostics before choosing.")
+                with st.expander("Safe search diagnostic"):
+                    st.json(result["candidate_diagnostics"])
             st.caption(name + " · " + (f"Found {len(result['candidates'])} candidates" if result["candidates"]
                                        else "No matching candidates"))
     return None if st.session_state[scope].get("manual") else match
@@ -302,16 +307,34 @@ def verification_view(store, inventory):
             st.info("This library is empty.")
             return
         report.sort(key=lambda r: (str(r["fields"]["title"]["value"]), r["item_id"]))
-        ids = [r["item_id"] for r in report]
+        all_ids = [r["item_id"] for r in report]
         scope_key = "book:" + digest([audit["server"], audit["library"], aid])
+        accepted = sum(r["review_status"] == "Accepted" for r in report)
+        previous, selector, following, filter_col = st.columns([1.25, 5, 1, 2], vertical_alignment="bottom", gap="small")
+        review_filter = filter_col.selectbox("Review status", ["Needs review", "Accepted", "All books"],
+                                            key=scope_key + ":filter", label_visibility="collapsed")
+        queue = [r for r in report if review_filter == "All books" or
+                 (r["review_status"] == "Accepted") == (review_filter == "Accepted")]
+        ids = [r["item_id"] for r in queue]
+        if message := st.session_state.pop("review_message", None):
+            st.success(message)
+        st.caption(f"{accepted} / {len(report)} accepted · {len(report) - accepted} remaining · Current = imported ABS snapshot")
+        if not ids:
+            st.info("All books accepted. Review complete." if review_filter == "Needs review" else "No accepted books yet.")
+
+            def show_all():
+                st.session_state[scope_key + ":filter"] = "All books"
+
+            st.button("Show all books", on_click=show_all)
+            return
         if st.session_state.get(scope_key) not in ids:
-            st.session_state[scope_key] = ids[0]
+            old_index = all_ids.index(st.session_state[scope_key]) if st.session_state.get(scope_key) in all_ids else 0
+            st.session_state[scope_key] = next((i for i in ids if all_ids.index(i) >= old_index), ids[0])
         index = ids.index(st.session_state[scope_key])
 
         def navigate(i):
             st.session_state[scope_key] = ids[i]
 
-        previous, selector, following = st.columns([1.25, 6, 1], vertical_alignment="bottom", gap="small")
         previous.button("Previous", disabled=index == 0, on_click=navigate, args=(index - 1,))
         # Secondary labels distinguish duplicate titles without exposing internal IDs.
         labels = {}
@@ -338,7 +361,6 @@ def verification_view(store, inventory):
             st.session_state[scope] = {"targets": {f: copy.deepcopy(corrections.get(f, {}).get("proposed", item["fields"][f]["value"]))
                                                    for f in fields}, "selected": {f: False for f in fields}}
         state = st.session_state[scope]
-        st.caption(f"Book {ids.index(iid) + 1} / {len(ids)} · {sum(r['review_status'] == 'Accepted' for r in report)} accepted · Current = imported ABS snapshot")
         match = reference_area(store, audit, item, scope)
         reference = reference_values(match) if match else {}
         with st.container(key="comparison", gap="xsmall"):
@@ -406,14 +428,21 @@ def verification_view(store, inventory):
             else:
                 state["selected"] = dict.fromkeys(fields, False)
                 st.session_state["review_message"] = "Confirmed locally. Corrections are in Changes; no remote write was sent."
-                if confirm_next and ids.index(iid) < len(ids) - 1:
-                    navigate(ids.index(iid) + 1)
+                if confirm_next:
+                    if review_filter == "Needs review":
+                        remaining = {r["item_id"] for r in store.verification_report(aid) if r["review_status"] != "Accepted"}
+                        following_ids = ids[index + 1:] + ids[:index + 1]
+                        target = next((i for i in following_ids if i in remaining), None)
+                        if target is None:
+                            st.session_state["review_message"] = "All books accepted. Review complete. No remote write was sent."
+                        else:
+                            st.session_state[scope_key] = target
+                    elif index < len(ids) - 1:
+                        navigate(index + 1)
                 st.rerun()
         if reopen or later:
             store.decide_fields(aid, iid, selected, "reopened" if reopen else "later", note or "Human review decision")
             st.rerun()
-        if message := st.session_state.pop("review_message", None):
-            st.success(message)
         with st.expander("Advanced / Evidence"):
             st.caption("Human acceptance is separate from independent verification. Snapshot: " + str(audit["finished"]))
             st.write("Desired metadata: " + ("Accepted target" if corrections else item["review_status"]))

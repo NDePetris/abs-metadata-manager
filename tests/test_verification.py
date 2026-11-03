@@ -304,7 +304,7 @@ def test_public_and_abs_schemas_and_units():
     assert custom.search(custom.query(book()))["candidates"][0]["work_only"]
 
 
-def test_cli_providers_search_argv_and_schema(monkeypatch):
+def test_cli_providers_and_direct_search_schema(monkeypatch):
     adapter = CliAdapter(Settings("http://test.invalid", "synthetic", "fake"))
     calls = []
 
@@ -315,12 +315,30 @@ def test_cli_providers_search_argv_and_schema(monkeypatch):
         return FIXTURES["abs"]
 
     monkeypatch.setattr(adapter, "_run", run)
+    monkeypatch.setattr(adapter, "_pace", lambda: None)
+    gets = []
+    body = FIXTURES["abs"]
+
+    def get(session, url, **kwargs):
+        assert not session.trust_env
+        assert session.headers["Authorization"] == "Bearer synthetic"
+        gets.append((url, kwargs))
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps(body).encode()
+        return response
+
+    monkeypatch.setattr(requests.Session, "get", get)
     assert adapter.metadata_providers()[0]["value"] == "audible"
     assert adapter.metadata_search("audible", {"title": "B012345678", "author": "Author"}) == FIXTURES["abs"]
-    assert calls[-1] == ["metadata", "search", "--provider", "audible", "--title", "B012345678", "--author", "Author"]
-    monkeypatch.setattr(adapter, "_run", lambda *args: {"invalid": []})
+    assert calls == [["metadata", "providers"]]
+    assert gets == [("http://test.invalid/api/search/books", {
+        "params": {"provider": "audible", "title": "B012345678", "author": "Author"},
+        "timeout": 90, "allow_redirects": False})]
+    body = {"invalid": []}
     with pytest.raises(AdapterError):
         adapter.metadata_search("audible", {"title": "title"})
+    assert len(gets) == 2 and calls == [["metadata", "providers"]]
 
 
 @pytest.mark.parametrize("failure", ["timeout", "rate", "bad", "auth"])

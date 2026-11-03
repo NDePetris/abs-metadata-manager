@@ -11,6 +11,7 @@ import re
 from typing import Protocol
 
 from .audit import analyze, embedded_evidence, embedded_title_key, folder_evidence
+from .diagnostics import CandidateError, data_type
 from .models import Book, canon, compact, digest, sequence
 
 QUALITY_FIELDS = ("title", "subtitle", "authors", "narrators", "translators", "series",
@@ -115,19 +116,57 @@ def fields_equal(field, left, right):
 
 def candidate(raw: dict, source: str, url: str = "", *, work_only=False) -> dict:
     """Normalize ABS/provider fields without discarding the provider's original record."""
-    for key in ("title", "subtitle", "language", "isbn", "asin", "url"):
+    if not isinstance(raw, dict):
+        raise CandidateError(expected="object", actual=data_type(raw), stage="shape")
+    for key in ("title", "subtitle", "language", "isbn", "asin", "url", "link", "publisher", "cover"):
         if raw.get(key) is not None and not isinstance(raw[key], str):
-            raise ValueError("Invalid candidate text field.")
-    series = raw.get("series", [])
+            raise CandidateError(key, "string or null", data_type(raw[key]))
+    for key in ("authors", "author", "narrators", "narrator", "translators", "translator"):
+        value = raw.get(key)
+        if value is None:
+            continue
+        entries = value if isinstance(value, list) else [value]
+        for entry in entries:
+            if not isinstance(entry, str) and not (isinstance(entry, dict) and isinstance(entry.get("name"), str)):
+                raise CandidateError(key, "string or named object", data_type(entry))
+    duration = raw.get("duration")
+    if duration is not None and (type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0):
+        raise CandidateError("duration", "finite nonnegative number or null", data_type(duration))
+    if raw.get("abridged") is not None and type(raw["abridged"]) is not bool:
+        raise CandidateError("abridged", "boolean or null", data_type(raw["abridged"]))
+    for key in ("publishedDate", "publishedYear", "id", "uuid", "recordingId", "productId"):
+        if raw.get(key) is not None and type(raw[key]) not in (str, int):
+            raise CandidateError(key, "string, integer or null", data_type(raw[key]))
+    series = raw.get("series") or []
+    if raw.get("series") is not None and not isinstance(raw["series"], (str, dict, list)):
+        raise CandidateError("series", "string, object, array or null", data_type(raw["series"]))
     if isinstance(series, str):
+        if raw.get("seriesNumber") not in (None, "") and sequence(raw["seriesNumber"]) is None:
+            raise CandidateError("seriesNumber", "nonnegative decimal or null", data_type(raw["seriesNumber"]))
         series = [{"name": series, "sequence": sequence(raw.get("seriesNumber"))}] if series else []
     if isinstance(series, dict):
         series = [series]
-    series = [{"name": s["name"], "sequence": sequence(s.get("sequence"))}
-              for s in series if isinstance(s, dict) and isinstance(s.get("name"), str)]
-    v = {"title": raw.get("title"), "authors": names(raw.get("authors", raw.get("author"))),
-         "narrators": names(raw.get("narrators", raw.get("narrator"))),
-         "translators": names(raw.get("translators", raw.get("translator"))),
+    for entry in series:
+        if not isinstance(entry, dict):
+            raise CandidateError("series[]", "named object", data_type(entry))
+        key = "name" if "name" in entry else "series"
+        if not isinstance(entry.get(key), str):
+            raise CandidateError("series[]." + key, "string", data_type(entry.get(key)))
+        if entry.get("sequence") not in (None, "") and sequence(entry["sequence"]) is None:
+            raise CandidateError("series[].sequence", "nonnegative decimal or null", data_type(entry["sequence"]))
+    # ABS Audible.cleanResult uses `series`, while saved ABS metadata uses `name`.
+    legacy_series = [{"name": s["name"], "sequence": sequence(s.get("sequence"))}
+                     for s in series if isinstance(s.get("name"), str)]
+    series = [{"name": s.get("name", s.get("series")), "sequence": sequence(s.get("sequence"))}
+              for s in series]
+    def credits(plural, singular):
+        # Preserve the previous explicit-null precedence and identity projection.
+        value = raw.get(plural, raw.get(singular))
+        return names([value] if isinstance(value, dict) else value)
+
+    v = {"title": raw.get("title"), "authors": credits("authors", "author"),
+         "narrators": credits("narrators", "narrator"),
+         "translators": credits("translators", "translator"),
          "series": series, "series_position": [s["sequence"] for s in series],
          "identifiers": {k: raw[k] for k in ("isbn", "asin") if raw.get(k)}}
     if "subtitle" in raw:
@@ -146,14 +185,19 @@ def candidate(raw: dict, source: str, url: str = "", *, work_only=False) -> dict
     identifier = str(v["identifiers"].get("asin", "")).strip().upper()
     provider_id = next((str(raw[k]) for k in ("id", "uuid", "recordingId", "productId")
                         if isinstance(raw.get(k), (str, int)) and str(raw[k]).strip()), None)
+    identity_values = {**v, "series": legacy_series, "series_position": [s["sequence"] for s in legacy_series]}
     recording_key = ({"source": source, "title": canon(v["title"]),
                       "authors": comparable("authors", v["authors"]), "narrators": comparable("narrators", v["narrators"]),
                       "duration": result["duration"], "language": result["language"], "abridged": result["abridged"]}
                      if not work_only and v["title"] and v["authors"] and v["narrators"] and result["duration"] else None)
-    result["id"] = digest({"source": source, "asin": identifier} if re.fullmatch(r"[A-Z0-9]{10}", identifier) else {"source": source, "provider_id": provider_id} if provider_id else recording_key if recording_key else {
-        "source": source, "values": v, "language": result["language"],
+    identity_data = {"source": source, "asin": identifier} if re.fullmatch(r"[A-Z0-9]{10}", identifier) else {"source": source, "provider_id": provider_id} if provider_id else recording_key if recording_key else {
+        "source": source, "values": identity_values, "language": result["language"],
         "duration": result["duration"], "abridged": result["abridged"],
-        "publisher": result["publisher"], "published": result["published"], "work_only": work_only})
+        "publisher": result["publisher"], "published": result["published"], "work_only": work_only}
+    try:
+        result["id"] = digest(identity_data)
+    except (TypeError, ValueError, KeyError):
+        raise CandidateError(stage="identity") from None
     return result
 
 
@@ -176,7 +220,9 @@ def reference_values(match):
             result.pop(field)
             continue
         original = raw[keys[0]] if keys else None
-        if field in ("authors", "narrators") and (original is None or not isinstance(original, (str, list))
+        if field != "identifiers" and original is None:
+            result[field] = None
+        if field in ("authors", "narrators") and (original is None or not isinstance(original, (str, list, dict))
                                                    or original and not result[field]):
             result[field] = None
     return result
@@ -292,7 +338,7 @@ def assess(book: Book, evidence: list[dict] = (), *, selected: str | None = None
         folder["limitation"] = "Calibre names may be truncated/sanitized; folders cannot prove a conflict."
     usable = [lookup.get("previous_success", lookup) if lookup.get("state") == "unavailable" else lookup
               for lookup in evidence]
-    candidates = list({c["id"]: c for lookup in usable if lookup.get("state") == "ok"
+    candidates = list({c["id"]: c for lookup in usable if lookup.get("state") in ("ok", "partial")
                        for c in lookup.get("candidates", [])}.values())
     rejected = set(rejected)
     matches = [{**match(book, c), "candidate": c, "rejected": c["id"] in rejected} for c in candidates]
