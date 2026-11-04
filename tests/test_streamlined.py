@@ -42,7 +42,8 @@ def test_confirm_stage_apply_narrator_and_reimport(tmp_path, monkeypatch):
     widget(at, "button", "Confirm").click().run()
     assert not at.exception
     assert not preview(store, aid)["books"]
-    widget(at, "button", "Show all books").click().run()
+    # Field acceptance leaves artwork/category checks outstanding in S3.
+    widget(at, "selectbox", "Quality").set_value("All books").run()
     widget(at, "text_input", "Desired narrators").set_value("Correct Narrator").run()
     widget(at, "button", "Confirm").click().run()
     assert not at.exception and not api.writes
