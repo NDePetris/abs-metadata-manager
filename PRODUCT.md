@@ -45,9 +45,9 @@ Calibre verification and later ABS sync observation are separate.
   changes no matching, assessment semantics, schema or UI behavior.
 - S2 supplies deterministic quality dispositions and bounded explicit evidence
   acquisition over existing snapshots; see [engine contract](docs/S2_ENGINE.md).
-- Later Phase 1 sessions implement the exception queue,
-  cover review and genre/tag hygiene discovery within existing
-  protections. Cover/tag writers are not authorized by this roadmap.
+- S3 supplies the quality exception queue, explicit saved-cover gallery/review and
+  library genre/tag preferences; see [S3 delivery](docs/S3_REVIEW.md).
+  Cover/tag writers are not authorized by this roadmap. S4 remains deferred.
 - Source portability (embedded tags, files, folders and sidecars), chapter
   remediation, new providers, AI adjudication and background work remain deferred.
 

@@ -16,6 +16,15 @@ The app binds to loopback at http://127.0.0.1:8501. No startup metadata requests
 
 ## Everyday workflow
 
+Match & Verify now starts with **quality exceptions**, not a requirement to accept
+every field. Independent evidence and Calibre authority can establish Pass without
+manual confirmation. Use Quality / Queue filters to find attention/evidence gaps,
+or All books to revisit passing values. Essential bibliographic progress is separate
+from artwork and optional categorization. Cover gallery intentionally retrieves up
+to 12 images and confirms only individually inspected artwork; genre/tag hygiene
+records exact-value library preferences. Make artwork and category corrections in
+native ABS/Calibre. See [S3 results, measurements and limitations](docs/S3_REVIEW.md).
+
 1. **Import:** Refresh Library reads ABS inventory, without a filesystem scan. Resume Import retains checkpoints; restart retains history. The latest completed inventory is displayed automatically. A newer incomplete import still prevents confirmation and writes.
 2. **Match & Verify:** use the searchable Book selector or Previous/Next. Compare **Current in ABS**, **Reference**, and editable **Desired** values in one grid. Current is the imported snapshot, not a live read. Fields begin unselected; editing, Use reference, and Restore current select just that field. Select all includes applicable fields only. **Confirm** saves selected targets locally; **Confirm & Next** advances only after successful atomic confirmation. Unchanged values become human acceptance; changed values enter Changes without write approval. Native name editors retain individual contributors/order; series positions accept decimal text. More review actions contains notes, Reopen Selected and Review Later.
 

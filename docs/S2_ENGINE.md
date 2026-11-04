@@ -74,9 +74,9 @@ one explicitly selected book. Ebooks are excluded from batch public searches and
 use already imported Calibre comparisons. Retry resets only unavailable task
 attachments; refresh explicitly ignores successful cache.
 
-S3 should consume report dispositions, per-field reasons/provenance and coverage
-directly. It still owns the exception queue, visual cover review and hygiene
-discovery. No live baseline, production database, credentials, files or metadata
+S3 now consumes report dispositions, per-field reasons/provenance and coverage
+directly for its exception queue, explicit visual cover review and hygiene
+discovery; see [S3 delivery](S3_REVIEW.md). No live baseline, production database, credentials, files or metadata
 were used in S2 tests; production operation 25 remains unresolved and untouched.
 
 ## Validation

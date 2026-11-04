@@ -10,7 +10,11 @@ The collapsed sidebar contains the single global Library selector, Import,
 Match & Verify, Changes, History and Settings, plus connection status. Normal
 pages use the latest completed inventory; historical snapshots are advanced tools.
 
-Match & Verify has a searchable book selector, Previous/Next, compact candidate
+Match & Verify starts with quality counts and a searchable exception selector,
+ordered by disposition and essential defects, with quality/field/reason filters.
+Historical manual acceptance is labeled separately. All books includes passing books
+in stable title order. Essential bibliographic progress and artwork state are separate.
+Previous/Next, compact candidate
 selection and a Field / Current in ABS / Reference / Desired grid. Keep the three
 value columns readable together. Current is an imported snapshot, not a live read.
 Long text wraps; contributor order and multiple decimal series rows survive editing.
@@ -29,10 +33,14 @@ S2 adds Read-only batch evidence inside Advanced / Evidence: selected or
 unattempted audiobooks, 1–25 books per invocation, explicit refresh, saved-run
 resume/cancel and unavailable retry. Coverage describes acquisition outcomes,
 separately from matches and quality. Ebooks retain existing Calibre comparisons.
-The existing review selector/editor is unchanged; S3 can consume the engine
-contract in [docs/S2_ENGINE.md](docs/S2_ENGINE.md).
+S3 consumes the engine contract in [docs/S2_ENGINE.md](docs/S2_ENGINE.md).
+An explicit gallery retrieves up to 12 saved covers and confirms only checked,
+inspected images, bound to content hashes. Library genre/tag hygiene has exact-value
+preferences and searchable affected-book lists. Both are collapsed native expanders
+beside the queue; corrections stay in native ABS/Calibre. No retrieval occurs on render.
+See [S3 delivery and limitations](docs/S3_REVIEW.md).
 
-## Phase 1 target (not implemented in S1)
+## Quality presentation (implemented in S3)
 
 The exception queue becomes the primary workflow, ordered/filterable by quality
 disposition and essential-field priority rather than requiring every field to be
