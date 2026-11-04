@@ -175,7 +175,7 @@ def test_editions_ambiguous_and_human_selection_distinct():
     first, second = external(), external(narrator="Other recording narrator", duration=2000)
     r = assess(book(), evidence(first, second))
     assert not r["ambiguous"]
-    assert r["fields"]["narrators"]["status"] == "Verified"
+    assert r["fields"]["narrators"]["status"] == "Unverified"
     assert r["matches"][1]["level"] == "work"
     assert "narrators" in r["matches"][1]["contradictions"]
     r = assess(book(), evidence(first, second), selected=first["id"])
@@ -186,7 +186,8 @@ def test_multi_credits_decimals_and_optional_fields():
     raw = copy.deepcopy(book().raw)
     raw["media"]["metadata"].update(authors=[{"name": "Author One"}, {"name": "Author Two"}],
                                       narrators=["Narrator One", "Narrator Two"], translator="Translator One")
-    c = external(authors=["Author Two", "Author One"], narrators=["Narrator Two", "Narrator One"],
+    raw["media"]["metadata"]["asin"] = "B012345678"
+    c = external(asin="B012345678", authors=["Author Two", "Author One"], narrators=["Narrator Two", "Narrator One"],
                  series="Example Series", seriesNumber="02.50", translator="Translator One")
     r = assess(Book(raw), evidence(c))
     for f in ("authors", "narrators", "series_position", "translators"):
@@ -408,6 +409,7 @@ def test_discrepancy_proposal_is_pending_and_guards_survive(setup):
     source.search = lambda query: {"raw": [], "candidates": [c]}
     rid = start_verification(store, aid, source, ["current-id"])
     run_verification(store, rid, source)
+    store.decide_candidate(aid, "current-id", c["id"], "selected", "Edition inspected")
     fid = propose_discrepancy(store, aid, "current-id", "subtitle", c["id"])
     f = next(f for f in store.findings(aid) if f["id"] == fid)
     assert f["status"] == "pending"
@@ -436,6 +438,7 @@ def test_fractional_series_discrepancy_can_be_pending(setup):
     rid = start_verification(store, aid, source, ["current-id"])
     run_verification(store, rid, source)
     # Remove the pre-existing title proposal only; series currently has no proposal.
+    store.decide_candidate(aid, "current-id", c["id"], "selected", "Edition inspected")
     fid = propose_discrepancy(store, aid, "current-id", "series", c["id"])
     assert next(f for f in store.findings(aid) if f["id"] == fid)["target"][0]["sequence"] == "4.5"
     assert not api.writes

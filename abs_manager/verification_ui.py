@@ -11,7 +11,65 @@ from .locking import BusyError, operation_lock
 from .models import digest, review_fields
 from .sources import RECORDING_PROVIDERS, AbsSource, PublicSource
 from .verification import can_copy_reference, contributor_comparison, reference_values
-from .verification_workflow import run_verification, start_verification
+from .verification_workflow import (
+    MAX_BATCH,
+    evidence_coverage,
+    retry_unavailable,
+    run_coverage,
+    run_verification,
+    start_verification,
+    unassessed_batch,
+)
+
+
+def acquisition_controls(store, audit, report, selected_id):
+    """Only button branches call providers; rendering reads existing checkpoints."""
+    adapter = st.session_state.get("adapter")
+    discovery = st.session_state.get("provider_discovery", {})
+    providers = discovery.get("providers", []) if adapter and discovery.get("server") == adapter.server else []
+    choices = ["abs:" + p["value"] for p in providers] + ["openlibrary", "googlebooks"]
+    source_id = st.selectbox("Batch evidence source", choices, format_func=source_label)
+    st.json(evidence_coverage(report, source_id), expanded=False)
+    st.caption("Counts describe captured evidence, not quality passes. Ebooks use existing Calibre comparisons. "
+               "Requests run sequentially with transport pacing; nothing resumes automatically.")
+    limit = int(st.number_input("Books per invocation", min_value=1, max_value=MAX_BATCH, value=10))
+    ids = [r["item_id"] for r in report if r["type"] == "audiobook"]
+    selected = st.multiselect("Selected audiobooks", ids, default=[selected_id] if selected_id in ids else [],
+                             format_func=lambda iid: next(str(r["fields"]["title"]["value"]) for r in report if r["item_id"] == iid))
+    refresh = st.checkbox("Refresh selected evidence (ignore successful cache)")
+    runs = [r for r in store.verification_runs(audit["id"]) if r["source"] == source_id]
+    pending = [r for r in runs if r["state"] != "complete"]
+    run = st.selectbox("Saved evidence run", [r["id"] for r in runs],
+                       format_func=lambda rid: next(f"Run {rid}: {r['state']} · {r['done']}/{r['total']} attempted"
+                                                   for r in runs if r["id"] == rid)) if runs else None
+    if run:
+        st.write(run_coverage(store, run))
+    missing_key = source_id == "googlebooks" and not os.getenv("GOOGLE_BOOKS_API_KEY", "")
+    with st.container(horizontal=True):
+        start = st.button("Verify selected batch", disabled=not selected or missing_key)
+        unassessed = st.button("Verify unassessed batch", disabled=source_id == "openlibrary" or missing_key)
+        resume = st.button("Resume evidence run", disabled=run not in [r["id"] for r in pending] or missing_key)
+        retry = st.button("Retry unavailable evidence", disabled=run is None or missing_key)
+        cancel = st.button("Cancel evidence run", disabled=run not in [r["id"] for r in pending])
+    if cancel:
+        store.cancel_verification(run)
+        st.rerun()
+    if start or unassessed or resume or retry:
+        try:
+            source = source_for(source_id, adapter)
+            if start or unassessed:
+                batch = unassessed_batch(report, source_id, limit) if unassessed else selected[:limit]
+                if not batch:
+                    st.info("No unattempted audiobooks for this source. Use selected refresh or explicit retry.")
+                    return
+                run = start_verification(store, audit["id"], source, batch, refresh=refresh if start else False)
+            elif retry:
+                retry_unavailable(store, run)
+            with st.spinner("Gathering bounded read-only evidence…"):
+                run_verification(store, run, source, limit=limit)
+            st.rerun()
+        except (ValueError, AdapterError, BusyError) as exc:
+            st.error(str(exc))
 
 
 def source_for(source_id, adapter):
@@ -444,6 +502,8 @@ def verification_view(store, inventory):
             store.decide_fields(aid, iid, selected, "reopened" if reopen else "later", note or "Human review decision")
             st.rerun()
         with st.expander("Advanced / Evidence"):
+            with st.expander("Read-only batch evidence"):
+                acquisition_controls(store, audit, report, iid)
             st.caption("Human acceptance is separate from independent verification. Snapshot: " + str(audit["finished"]))
             st.write("Desired metadata: " + ("Accepted target" if corrections else item["review_status"]))
             observed = [r for r in store.corrections(aid) if r["item_id"] == iid and r["abs_observed"]]

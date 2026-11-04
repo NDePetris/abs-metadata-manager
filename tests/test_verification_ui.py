@@ -36,3 +36,24 @@ def test_reject_then_search_another_source(setup, monkeypatch):
     assert calls == ["audible", "audnexus"]
     assert any(d["decision"] == "rejected" for d in store.candidate_decisions(aid, "current-id").values())
     assert widget(at, "selectbox", "Book").value == "current-id" and not api.writes
+
+
+def test_bounded_batch_controls_are_explicit_and_cache_success(setup, monkeypatch):
+    store, api, aid = setup
+    calls = []
+    api.metadata_search = lambda provider, query: calls.append((provider, query)) or []
+    at = app(store, api, monkeypatch)
+    at.session_state["provider_discovery"] = {"server": api.server, "status": "available",
+                                               "providers": [{"value": "audible"}]}
+    page(at, "Match & Verify")
+    assert not calls
+    widget(at, "button", "Verify selected batch").click().run()
+    assert not at.exception and len(calls) == 1
+    at.run()
+    assert len(calls) == 1
+    widget(at, "button", "Verify selected batch").click().run()
+    assert not at.exception and len(calls) == 1
+    widget(at, "checkbox", "Refresh selected evidence (ignore successful cache)").check().run()
+    widget(at, "button", "Verify selected batch").click().run()
+    assert not at.exception and len(calls) == 2
+    assert not api.writes and not store.corrections(aid)

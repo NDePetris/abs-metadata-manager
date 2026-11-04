@@ -4,6 +4,7 @@ No transport, approval, or mutation capabilities belong in this module.
 """
 from __future__ import annotations
 
+import copy
 import csv
 import io
 import math
@@ -15,8 +16,72 @@ from .diagnostics import CandidateError, data_type
 from .models import Book, canon, compact, digest, sequence
 
 QUALITY_FIELDS = ("title", "subtitle", "authors", "narrators", "translators", "series",
-                  "series_position", "identifiers", "cover", "chapters", "embedded")
+                  "series_position", "identifiers", "cover", "chapters", "embedded", "genres", "tags")
 STATUSES = ("Verified", "Consistent", "Conflict", "Missing", "Unverified", "Not applicable")
+DISPOSITIONS = ("Pass", "Needs attention", "Needs evidence")
+
+
+def quality_policy(report, decisions=None, corrections=()):
+    """Derive current-value quality, independently of local acceptance/write approval.
+
+    Chapters and embedded files retain diagnostics but are deferred inspections.
+    Cover presence never establishes quality. Inputs are not mutated.
+    """
+    result = copy.deepcopy(report)
+    decisions = decisions or {}
+    for field, details in result["fields"].items():
+        value, status = details["value"], details["status"]
+        decision = decisions.get(field) or {}
+        valid = decision.get("valid") and decision.get("value") == value
+        outstanding = any(c["item_id"] == report["item_id"] and c["field"] == ("series" if field == "series_position" else field)
+                          and c["status"] not in ("discarded", "observed_in_abs")
+                          for c in corrections)
+        new_conflict = (status == "Conflict" or details.get("evidence_issue") == "conflicting_references") and any(
+            p.get("source") == "Calibre catalog" and p.get("imported", "") > decision.get("created", "")
+            or any(l.get("captured", "") > decision.get("created", "") for l in p.get("lookups", []))
+            for p in details["provenance"])
+        identity_conflicts = [m for m in report["matches"] if not m["rejected"]
+                              and {"asin", "isbn"} & set(m["signals"])
+                              and (field in m["contradictions"] or field == "narrators"
+                                   and m["classification"] == "different_recording")]
+        fresh_identity_conflict = any(
+            l.get("captured", "") > decision.get("created", "")
+            for attempt in report["lookups"] for l in [attempt.get("previous_success", attempt)]
+            if any(c["id"] == m["candidate_id"] for c in l.get("candidates", []) for m in identity_conflicts))
+        new_conflict = new_conflict or fresh_identity_conflict
+        applicable = status != "Not applicable" and field != "embedded" and (field != "chapters" or status == "Conflict")
+        required = field in ("title", "authors", "cover") or field == "narrators" and report["type"] == "audiobook"
+        if outstanding or valid and decision.get("decision") == "correction_needed":
+            disposition, reason = "Needs attention", "correction_outstanding"
+        elif not applicable:
+            disposition, reason = "Pass", "not_applicable" if status == "Not applicable" else "inspection_deferred"
+        elif required and not value:
+            disposition, reason = "Needs attention", "required_missing"
+        elif valid and decision.get("decision") in ("unable", "later", "reopened"):
+            disposition, reason = "Needs evidence", "human_unresolved"
+        elif valid and decision.get("decision") == "confirmed" and not new_conflict:
+            disposition, reason = "Pass", "human_confirmed"
+        elif identity_conflicts:
+            disposition, reason = "Needs attention", "identity_conflict"
+        elif status in ("Conflict", "Missing"):
+            disposition, reason = "Needs attention", "conflict" if status == "Conflict" else "required_missing"
+        elif details.get("evidence_issue"):
+            disposition, reason = "Needs evidence", details["evidence_issue"]
+        elif not value and field in ("subtitle", "translators", "identifiers", "series", "genres", "tags"):
+            disposition, reason = "Pass", "optional_absent"
+        elif any(l.get("state") == "partial" for p in details["provenance"] for l in p.get("lookups", [])):
+            disposition, reason = "Needs evidence", "partial_evidence"
+        elif status == "Verified":
+            disposition, reason = "Pass", "independently_verified"
+        elif status == "Consistent" and any(p["source"] == "Calibre catalog" for p in details["provenance"]):
+            disposition, reason = "Pass", "calibre_authority"
+        else:
+            disposition, reason = "Needs evidence", details.get("evidence_issue", "evidence_insufficient")
+        details.update(disposition=disposition, reason_code=reason, quality_applicable=applicable)
+    dispositions = [f["disposition"] for f in result["fields"].values()]
+    result["disposition"] = next((d for d in ("Needs attention", "Needs evidence") if d in dispositions), "Pass")
+    result["quality_counts"] = {d: dispositions.count(d) for d in DISPOSITIONS}
+    return result
 
 
 class EvidenceAdjudicator(Protocol):
@@ -56,6 +121,7 @@ def values(book: Book) -> dict:
             "series_position": [sequence(s["sequence"]) for s in book.values["series"]],
             "identifiers": {k: m[k] for k in ("isbn", "asin") if m.get(k)},
             "cover": media.get("coverPath"), "chapters": media.get("chapters", []),
+            "genres": m.get("genres", []), "tags": media.get("tags", []),
             "embedded": embedded_evidence(book)}
 
 
@@ -286,9 +352,9 @@ def match(book: Book, item: dict) -> dict:
     # ISBNs from work-level aggregations never identify a particular recording.
     work = ("title" in signals and "authors" in signals) or bool(exact_ids)
     wrong_work = not work or bool({"title", "authors"} & set(contradictions))
-    recording_conflicts = {"asin", "narrators", "duration", "abridgment", "language"} & set(contradictions)
+    recording_conflicts = {"asin", "isbn", "narrators", "duration", "abridgment", "language"} & set(contradictions)
     recording = (book.is_audio and not item.get("work_only") and not wrong_work and not recording_conflicts
-                 and ("asin" in exact_ids or {"narrators", "duration"} <= set(signals)))
+                 and ("asin" in exact_ids or "isbn" in exact_ids and {"narrators", "duration"} <= set(signals)))
     classification = ("wrong_work" if wrong_work else "correct_recording" if recording else
                       "different_recording" if book.is_audio and not item.get("work_only") and recording_conflicts
                       else "recording_uncertain")
@@ -338,7 +404,10 @@ def assess(book: Book, evidence: list[dict] = (), *, selected: str | None = None
         folder["limitation"] = "Calibre names may be truncated/sanitized; folders cannot prove a conflict."
     usable = [lookup.get("previous_success", lookup) if lookup.get("state") == "unavailable" else lookup
               for lookup in evidence]
-    candidates = list({c["id"]: c for lookup in usable if lookup.get("state") in ("ok", "partial")
+    # Preserve contradictory observations of the same stable rejection identity.
+    # Provider identity alone must not collapse differing credits by result order.
+    candidates = list({digest({k: v for k, v in c.items() if k not in ("raw", "url")}): c
+                       for lookup in usable if lookup.get("state") in ("ok", "partial")
                        for c in lookup.get("candidates", [])}.values())
     rejected = set(rejected)
     matches = [{**match(book, c), "candidate": c, "rejected": c["id"] in rejected} for c in candidates]
@@ -393,27 +462,65 @@ def assess(book: Book, evidence: list[dict] = (), *, selected: str | None = None
                 r"\bBook\s+\d+(?:\.\d+)?\s*$", value, re.IGNORECASE) or
                 any(canon(saved["title"] or "").endswith(sep + canon(value)) for sep in (": ", " - "))):
             status, reason = "Conflict", "Possible duplicated title or promotional series subtitle; inspect edition."
-        if external and field in external["candidate"]["values"] and status != "Not applicable":
-            other = external["candidate"]["values"][field]
-            # Missing optional source fields do not assert absence.
-            valid = field != "identifiers" or not other.get("isbn") or bool(isbn_key(other["isbn"]))
-            if valid and (other or field == "subtitle" and other == ""):
-                provenance.append({"source": external["candidate"]["source"], "url": external["candidate"]["url"],
-                                   "candidate_id": external["candidate_id"], "value": other,
-                                   "match": external["level"], "human_selected": chosen is not None,
-                                   "lookups": [{k: lookup[k] for k in ("query", "captured") if k in lookup}
-                                               for lookup in usable if any(c["id"] == external["candidate_id"]
-                                                                           for c in lookup.get("candidates", []))]})
-                equal = fields_equal(field, value, other)
-                recording_field = field in ("subtitle", "narrators", "translators", "series_position", "identifiers") and book.is_audio
-                human_recording = chosen and not external["candidate"].get("work_only")
-                if not recording_field or external["level"] == "recording" or human_recording:
-                    status = ("Consistent" if chosen else "Verified") if equal else "Conflict"
-                    reason = "External evidence agrees." if equal else "External candidate differs; discrepancy requires review."
-                    if chosen:
-                        reason += " Human-selected edition; selection is not independent recording verification."
-        if len(plausible) > 1 and not chosen and status not in ("Not applicable", "Missing"):
-            status, reason = "Unverified", "Ambiguous: multiple plausible editions/candidates; inspect and select an edition."
+        structural_subtitle = field == "subtitle" and status == "Conflict"
+        # Work agreement can corroborate title/authors across editions. Recording
+        # fields require a positive recording identity, independently of result count.
+        recording_field = book.is_audio and field not in ("title", "authors")
+        eligible = [m for m in matches if not m["rejected"] and m["level"] != "unmatched"
+                    and (not recording_field or m["level"] == "recording")]
+        if chosen:
+            eligible = [chosen] if not recording_field or not chosen["candidate"].get("work_only") else []
+        comparisons = []
+        for corroboration in eligible:
+            supplied = reference_values(corroboration)
+            # Positions/translator credits are normalized but not copyable UI fields.
+            if field in ("series_position", "translators"):
+                supplied = corroboration["candidate"]["values"]
+            other = supplied.get(field)
+            if other is None or not other and not (field == "subtitle" and other == ""):
+                continue
+            if field == "identifiers" and other.get("isbn") and not isbn_key(other["isbn"]):
+                continue
+            provenance.append({"source": corroboration["candidate"]["source"],
+                               "url": corroboration["candidate"]["url"],
+                               "candidate_id": corroboration["candidate_id"], "value": other,
+                               "match": corroboration["level"], "human_selected": chosen is not None,
+                               "lookups": [{k: lookup[k] for k in ("query", "captured", "state") if k in lookup}
+                                           for lookup in usable if any(c["id"] == corroboration["candidate_id"]
+                                                                       for c in lookup.get("candidates", []))]})
+            if field == "identifiers":
+                current_ids, reference_ids = comparable(field, value), comparable(field, other)
+                comparisons.append(all(current_ids.get(k) == v for k, v in reference_ids.items()))
+            else:
+                comparisons.append(fields_equal(field, value, other))
+        references = [p["value"] for p in provenance if "candidate_id" in p]
+        disagreement = any(not fields_equal(field, references[0], v) for v in references[1:]) if references else False
+        if field == "identifiers":
+            identifiers = [comparable(field, v) for v in references]
+            disagreement = any(a[k] != b[k] for a in identifiers for b in identifiers for k in a.keys() & b.keys())
+        if comparisons and status != "Not applicable":
+            if disagreement:
+                status, reason = "Unverified", "External references disagree; no automatic choice by source order."
+            elif not all(comparisons):
+                status, reason = "Conflict", "Credible external evidence differs; discrepancy requires review."
+            else:
+                status = "Consistent" if chosen else "Verified"
+                reason = "External evidence agrees."
+                if field == "identifiers" and set(value) - {k for ref in references for k in ref}:
+                    status, reason = "Unverified", "Only some saved identifiers were corroborated."
+            if chosen:
+                reason += " Human-selected edition; selection is not independent recording verification."
+        if structural_subtitle:
+            status, reason = "Conflict", "Possible duplicated or promotional subtitle; review the saved structure."
+        # A work-only search result is useful for work fields, never narrator proof.
+        if recording_field and not chosen and len(plausible) > 1 and not any(
+                m["level"] == "recording" for m in plausible) and status not in ("Missing", "Conflict", "Not applicable"):
+            status, reason = "Unverified", "Ambiguous recording identity; work agreement cannot verify this field."
+        recording_matches = [m for m in plausible if m["level"] == "recording"]
+        if (recording_field and not chosen and len(recording_matches) > 1
+                and not all("asin" in m["signals"] for m in recording_matches)
+                and status not in ("Missing", "Conflict", "Not applicable")):
+            status, reason = "Unverified", "Multiple recording candidates without a shared exact recording ASIN."
         if calibre and not book.is_audio and field in calibre["values"]:
             other = calibre["values"][field]
             provenance.append({"source": "Calibre catalog", "catalog_id": calibre["id"], "value": other,
@@ -422,6 +529,8 @@ def assess(book: Book, evidence: list[dict] = (), *, selected: str | None = None
             reason = "Compared with authoritative read-only Calibre catalog; catalog is not external verification."
         fields[field] = {"value": value, "status": status, "reason": reason, "provenance": provenance,
                          "local_findings": relevant, "human_review": (reviews or {}).get(field)}
+        if disagreement:
+            fields[field]["evidence_issue"] = "conflicting_references"
     return {"item_id": book.id, "identity": book.identity, "type": "audiobook" if book.is_audio else "ebook",
             "fields": fields, "folder": folder, "lookups": list(evidence), "matches": matches,
             "ambiguous": len(plausible) > 1, "selected_candidate": selected,

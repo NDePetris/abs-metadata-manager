@@ -163,7 +163,7 @@ class PersistentState:
             ):
                 raise ValueError("The latest complete audit is required.")
             vals = values(book)
-            if decision == "confirmed" and any(f not in review_fields(book.is_audio) for f in fields):
+            if decision == "confirmed" and not book.is_audio and "narrators" in fields:
                 raise ValueError("Select applicable metadata fields.")
             with self.connect() as db:
                 for field in dict.fromkeys(fields):

@@ -12,6 +12,63 @@ from .models import FIELDS, compact, digest
 from .store import now
 from .verification import comparable, fields_equal
 
+MAX_BATCH = 25
+
+
+def evidence_coverage(report, source=None):
+    """Snapshot-only coverage; discovery and a successful identity match differ."""
+    counts = dict.fromkeys(("total", "attempted", "ok", "matched", "no_match", "partial", "unavailable",
+                           "unattempted", "calibre", "remaining"), 0)
+    captures = []
+    for item in report:
+        counts["total"] += 1
+        if item["type"] == "ebook":
+            linked = any(p["source"] == "Calibre catalog" for f in item["fields"].values() for p in f["provenance"])
+            counts["calibre"] += int(linked)
+            counts["remaining"] += int(not linked)
+            continue
+        lookups = [l for l in item["lookups"] if source is None or l["source"] == source]
+        if not lookups:
+            counts["unattempted"] += 1
+            counts["remaining"] += 1
+            continue
+        counts["attempted"] += 1
+        latest = max(lookups, key=lambda l: l.get("captured", ""))
+        counts[latest["state"]] += 1
+        captures.append(latest.get("captured", ""))
+        counts["remaining"] += int(latest["state"] in ("partial", "unavailable"))
+        counts["matched"] += int(any(not m["rejected"] and m["level"] != "unmatched"
+                                     and (source is None or m["candidate"]["source"] == source)
+                                     for m in item["matches"]))
+    return {**counts, "last_capture": max(captures, default=None)}
+
+
+def unassessed_batch(report, source, limit=MAX_BATCH):
+    if type(limit) is not int or not 1 <= limit <= MAX_BATCH:
+        raise ValueError("Choose between 1 and 25 books.")
+    return [r["item_id"] for r in report if r["type"] == "audiobook"
+            and not any(l["source"] == source for l in r["lookups"])][:limit]
+
+
+def run_coverage(store, run_id):
+    """Count durable task outcomes and reuse without invoking a source."""
+    run = store.rows("SELECT created FROM verification_runs WHERE id=?", (run_id,))[0]
+    tasks = store.rows("SELECT t.lookup_id,l.captured,l.data FROM verification_tasks t "
+                       "LEFT JOIN verification_lookups l ON l.id=t.lookup_id WHERE t.run_id=?", (run_id,))
+    states = dict.fromkeys(("ok", "no_match", "partial", "unavailable", "unattempted"), 0)
+    errors, new_lookups, done = set(), set(), 0
+    for task in tasks:
+        data = json.loads(task["data"]) if task["data"] else None
+        states[data["state"] if data else "unattempted"] += 1
+        if data:
+            done += 1
+            if task["captured"] >= run["created"]:
+                new_lookups.add(task["lookup_id"])
+            if data.get("error"):
+                errors.add(data["error"])
+    return {**states, "cache_reused": done - len(new_lookups), "new_lookups": len(new_lookups),
+            "errors": sorted(errors)}
+
 
 def start_verification(store, audit_id, source, item_ids, *, refresh=False, query_overrides=None):
     with operation_lock(store.path):
@@ -47,7 +104,12 @@ def start_verification(store, audit_id, source, item_ids, *, refresh=False, quer
                         query = dict(refinement)
                     else:
                         query = {**query, **refinement}
-                key = digest({"source": source.id, "scope": source.scope, "query": query, "schema": 1})
+                key = digest({"source": source.id, "scope": source.scope, "query": query, "schema": 2,
+                              "values": books[item_id].values,
+                              "identifiers": {k: books[item_id].metadata.get(k) for k in ("asin", "isbn")},
+                              "duration": books[item_id].raw["media"].get("duration"),
+                              "language": books[item_id].metadata.get("language"),
+                              "abridged": books[item_id].metadata.get("abridged")})
                 cached = None if refresh else db.execute(
                     "SELECT id FROM verification_lookups WHERE cache_key=? "
                     "AND json_extract(data,'$.state') IN ('ok','no_match') ORDER BY id DESC LIMIT 1", (key,)).fetchone()
@@ -57,6 +119,8 @@ def start_verification(store, audit_id, source, item_ids, *, refresh=False, quer
 
 
 def run_verification(store, run_id, source, *, progress=lambda *args: None, cancelled=lambda: False, limit=110):
+    if type(limit) is not int or not 1 <= limit <= 110:
+        raise ValueError("Request limit must be between 1 and 110.")
     with operation_lock(store.path):
         run = store.rows("SELECT * FROM verification_runs WHERE id=?", (run_id,))[0]
         if (run["source"], run["scope"]) != (source.id, source.scope):
