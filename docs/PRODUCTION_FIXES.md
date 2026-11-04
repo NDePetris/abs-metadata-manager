@@ -79,8 +79,8 @@ not locate the failing hop.
 
 ## Existing database and operation 25
 
-1. Stop the app. Back up the existing database, including any SQLite WAL/SHM
-   sidecars if present, as a consistent set. Keep the original journals. Install
+1. Stop the app. Follow the [consistent backup and restore procedure](../README.md#backup-restore-and-uncertain-writes),
+   retaining decisions and original journals, including any SQLite sidecars in a raw archive. Install
    this branch and restart using the same database. These changes add no schema
    migrations. Do not operate independent database copies against the same server.
 2. In Settings, connect to the original ABS server and select the original library.

@@ -1,6 +1,13 @@
 # Manual validation against your Audiobookshelf server
 
-Development made no production metadata writes. Follow the read-only checks first; the first write below is a deliberate action you perform in the app.
+This is an operator checklist, not authorization for development writes. Phase 0
+live validation remains incomplete. The last recorded production operation 25 is
+uncertain; [reconcile it read-only first](PRODUCTION_FIXES.md#existing-database-and-operation-25).
+Do not treat historical local test results or successful command submission as
+production end-to-end verification. S1 performs no live validation or writes.
+
+Before using this checklist, follow the [local backup/restore procedure](../README.md#backup-restore-and-uncertain-writes).
+Any later write below is a separate deliberate operator action after recovery.
 
 ## Setup and read-only checks
 

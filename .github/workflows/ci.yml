@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows full suite and launcher
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      ABS_MM_DB: ${{ runner.temp }}/abs-mm/app.sqlite3
+      ABS_MM_SETTINGS: ${{ runner.temp }}/abs-mm/settings
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install locked development environment
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install -r requirements.lock.txt -e '.[dev]'
+      - name: Dependency consistency
+        run: .\.venv\Scripts\python.exe -m pip check
+      - name: Ruff
+        run: .\.venv\Scripts\python.exe -m ruff check app.py abs_manager tests
+      - name: Launcher check (no server or CLI installation)
+        run: .\start.ps1 -Check
+      - name: Full synthetic regression suite (skip reasons included)
+        run: .\.venv\Scripts\python.exe -m pytest -ra --durations=10 --junitxml=test-results.xml
+      - name: Publish test results, including skips
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-results
+          path: test-results.xml
+          if-no-files-found: ignore
+
+  linux:
+    name: Linux backend and recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install locked development environment
+        run: python -m pip install -r requirements.lock.txt -e '.[dev]'
+      - name: Dependency consistency
+        run: python -m pip check
+      - name: Synthetic backend, locking and recovery regressions
+        run: >-
+          python -m pytest -ra --durations=10 --junitxml=test-results.xml
+          tests/test_adapter.py tests/test_audit.py tests/test_audit_recovery.py
+          tests/test_workflow.py tests/test_decision_safety.py tests/test_cli_search_contract.py
+          tests/test_harness.py
+      - name: Publish test results, including skips
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-test-results
+          path: test-results.xml
+          if-no-files-found: ignore

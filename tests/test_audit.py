@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 
 import pytest
 from conftest import PRIVATE, make_book
@@ -117,7 +118,8 @@ def test_series_payload_only_names_and_string_positions():
         payload({"chapters": []})
 
 
-@pytest.mark.skipif(not PRIVATE.exists(), reason="Private 110-book export stays outside source control")
+@pytest.mark.skipif(os.getenv("ABS_MM_TEST_PRIVATE_EXPORT") != "1" or not PRIVATE.exists(),
+                    reason="Private historical export excluded; synthetic suite does not read personal inventory")
 def test_private_export_regressions(tmp_path):
     from abs_manager.store import Store
     store = Store(tmp_path / "private.sqlite3")

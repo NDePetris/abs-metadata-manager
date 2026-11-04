@@ -156,11 +156,10 @@ class LocalABS(BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def clean_cli_profile():
+def clean_cli_profile(cli_profile_path):
     # The executable uses Windows' known profile folder; HOME overrides and
     # monkeypatching the Python config reader cannot isolate its saved tokens.
-    from scripts.diagnose_metadata_search import cli_profile
-    if (cli_profile() / ".abs-cli" / "config.json").exists():
+    if (cli_profile_path / ".abs-cli" / "config.json").exists():
         pytest.skip("Official binary requires a clean OS profile; personal config was not opened")
 
 
