@@ -261,22 +261,22 @@ class Store(PersistentState):
                          "FROM verification_runs r LEFT JOIN verification_tasks t ON t.run_id=r.id "
                          "WHERE r.audit_id=? GROUP BY r.id ORDER BY r.id DESC", (audit_id,))
 
-    def verification_evidence(self, audit_id, item_id):
-        rows = self.rows("SELECT l.data FROM verification_tasks t JOIN verification_runs r ON r.id=t.run_id "
+    def verification_evidence(self, audit_id, item_id, *, _inputs=None):
+        rows = list(_inputs["lookups"].get((audit_id, item_id), [])) if _inputs is not None else self.rows("SELECT l.data FROM verification_tasks t JOIN verification_runs r ON r.id=t.run_id "
                          "JOIN verification_lookups l ON l.id=t.lookup_id WHERE r.audit_id=? AND t.item_id=? "
                          "ORDER BY r.id DESC", (audit_id, item_id))
-        audit = self.audit(audit_id)
-        book = self.book(audit_id, item_id)
+        audit = _inputs["audit"] if _inputs is not None else self.audit(audit_id)
+        book = _inputs["books"][item_id] if _inputs is not None else self.book(audit_id, item_id)
         from .persistent_state import identity
         known = {json.loads(r["data"])["source"] for r in rows}
-        previous = self.rows("SELECT b.raw,b.audit_id FROM books b JOIN audits a ON a.id=b.audit_id "
+        previous = _inputs["previous"].get(item_id, []) if _inputs is not None else self.rows("SELECT b.raw,b.audit_id FROM books b JOIN audits a ON a.id=b.audit_id "
                              "WHERE a.server=? AND a.library=? AND a.status='complete' AND a.id<? AND b.item_id=? ORDER BY a.id DESC",
                              (audit["server"], audit["library"], audit_id, item_id))
         for old in previous:
             prior = Book(json.loads(old["raw"]))
             if identity(prior) != identity(book) or prior.values != book.values:
                 break
-            captured = self.rows("SELECT l.data FROM verification_tasks t JOIN verification_runs r ON r.id=t.run_id "
+            captured = _inputs["lookups"].get((old["audit_id"], item_id), []) if _inputs is not None else self.rows("SELECT l.data FROM verification_tasks t JOIN verification_runs r ON r.id=t.run_id "
                                  "JOIN verification_lookups l ON l.id=t.lookup_id WHERE r.audit_id=? AND t.item_id=? ORDER BY r.id DESC",
                                  (old["audit_id"], item_id))
             missing = [r for r in captured if json.loads(r["data"])["source"] not in known]
@@ -318,26 +318,70 @@ class Store(PersistentState):
                            (audit_id, item_id, field, compact(data)))
 
     def verification_report(self, audit_id):
+        from collections import defaultdict
+
+        from .library_review import category_assessments, category_inventory, cover_identity
+        from .persistent_state import identity
         from .verification import assess, quality_policy
-        if self.audit(audit_id)["status"] != "complete":
+        audit = self.audit(audit_id)
+        if audit["status"] != "complete":
             raise ValueError("Verification requires a completed audit snapshot.")
+        # Request-local batches, rebuilt on every call; no cross-rerun cache or write-path changes.
+        books = {b.id: b for b in self.books(audit_id)}
+        scope = (audit["server"], audit["library"], audit_id)
+        field_rows, candidate_rows, annotations, previous, lookups = (defaultdict(list) for _ in range(5))
+        for table, destination in (("field_decision_history", field_rows),
+                                   ("candidate_decision_history", candidate_rows)):
+            for row in self.rows(f"SELECT * FROM {table} WHERE server=? AND library=? AND audit_id<=? ORDER BY id DESC", scope):
+                destination[row["item_id"]].append(row)
+        for row in self.rows("SELECT v.* FROM verification_annotations v JOIN audits a ON a.id=v.audit_id "
+                             "WHERE a.server=? AND a.library=? AND v.audit_id<=? ORDER BY v.audit_id DESC", scope):
+            annotations[row["item_id"]].append(row)
+        for row in self.rows("SELECT b.item_id,b.raw,b.audit_id FROM books b JOIN audits a ON a.id=b.audit_id "
+                             "WHERE a.server=? AND a.library=? AND a.status='complete' AND a.id<? ORDER BY a.id DESC", scope):
+            previous[row["item_id"]].append(row)
+        for row in self.rows("SELECT r.audit_id,t.item_id,l.data FROM verification_tasks t "
+                             "JOIN verification_runs r ON r.id=t.run_id JOIN audits a ON a.id=r.audit_id "
+                             "JOIN verification_lookups l ON l.id=t.lookup_id WHERE a.server=? AND a.library=? "
+                             "AND r.audit_id<=? ORDER BY r.id DESC", scope):
+            lookups[row["audit_id"], row["item_id"]].append(row)
+        inputs = {"audit": audit, "books": books, "previous": previous, "lookups": lookups}
+        corrections = self.corrections(audit_id)
+        corrections_by_item, staged_by_item = defaultdict(list), defaultdict(list)
+        for correction in corrections:
+            corrections_by_item[correction["item_id"]].append(correction)
+        for row in self.rows("SELECT item_id,field,status FROM findings WHERE audit_id=? AND actionable=1 "
+                             "AND status IN ('pending','approved') AND kind IN ('manual','confirmed_target')", (audit_id,)):
+            staged_by_item[row["item_id"]].append(row)
         catalogs = self.rows("SELECT data FROM calibre_catalogs WHERE audit_id=?", (audit_id,))
         catalog = json.loads(catalogs[0]["data"]) if catalogs else {}
         result = []
-        for book in self.books(audit_id):
-            annotations = self.verification_annotations(audit_id, book.id)
-            decisions = self.candidate_decisions(audit_id, book.id)
+        for book in books.values():
+            reviews = {r["field"]: json.loads(r["data"]) for r in annotations[book.id] if r["audit_id"] == audit_id}
+            cover_row = next((r for r in annotations[book.id] if r["field"] == "cover"), None)
+            if cover_row:
+                cover = json.loads(cover_row["data"])
+                if cover.get("cover_identity") == cover_identity(book):
+                    reviews["cover"] = cover
+                elif cover.get("state"):
+                    reviews["cover"] = {"state": "changed"}
+            book_scope = (audit, book, identity(book))
+            history = self.candidate_decisions(audit_id, book.id, history=True,
+                                               _scope=book_scope, _rows=candidate_rows[book.id])
+            decisions = {}
+            for row in history:
+                decisions.setdefault(row["candidate_id"], row)
             valid = [d for d in decisions.values() if d["valid"]]
-            history = self.candidate_decisions(audit_id, book.id, history=True)
             choice = next((d for d in history if d["decision"] in ("selected", "absent")), None)
             current_choice = decisions.get(choice["candidate_id"]) if choice else None
             selected = (choice["candidate_id"] if choice and choice["decision"] == "selected"
                         and current_choice and current_choice["valid"] and current_choice["decision"] == "selected"
                         else None)
             rejected = [d["candidate_id"] for d in valid if d["decision"] in ("rejected", "wrong_book")]
-            report = assess(book, self.verification_evidence(audit_id, book.id), reviews=annotations,
+            report = assess(book, self.verification_evidence(audit_id, book.id, _inputs=inputs), reviews=reviews,
                             selected=selected, rejected=rejected, calibre=catalog.get(book.id))
-            report["human_decisions"] = self.field_decisions(audit_id, book.id)
+            report["human_decisions"] = self.field_decisions(audit_id, book.id, _scope=book_scope,
+                                                             _rows=field_rows[book.id], _corrections=corrections)
             report["candidate_decisions"] = decisions
             report["manual_edition"] = (choice if choice and choice["decision"] == "absent"
                                         and current_choice and current_choice["valid"]
@@ -345,12 +389,10 @@ class Store(PersistentState):
             for field, details in report["fields"].items():
                 details["decision"] = report["human_decisions"].get(field)
             from .models import review_fields
-            from .persistent_state import identity
             relevant = [report["fields"][f] for f in review_fields(book.is_audio)]
             # Confirmed targets are human acceptance even before application.
             # A generic correction-needed decision without that exact durable
             # accepted target is still unfinished. Keep this rule in the report.
-            corrections = self.corrections(audit_id)
             for field in review_fields(book.is_audio):
                 details = report["fields"][field]
                 d = details["decision"]
@@ -360,7 +402,7 @@ class Store(PersistentState):
                         and c["audit_id"] == d["audit_id"] and c["created"] >= d["created"]
                         and c["identity_digest"] == identity(book, field) and c["current"] == d["value"]
                         and c["status"] in ("pending", "edited_in_calibre", "verified_in_calibre")
-                        for c in corrections)))
+                        for c in corrections_by_item[book.id])))
             pending = [d for d in relevant if not d["review_accepted"]]
             if any(d["decision"] and d["decision"]["valid"] and d["decision"]["decision"] == "correction_needed" for d in pending):
                 report["review_status"] = "Correction needed"
@@ -372,11 +414,11 @@ class Store(PersistentState):
                 report["review_status"] = "Unable to verify"
             else:
                 report["review_status"] = "Needs review"
-            staged = self.rows("SELECT item_id,field,status FROM findings WHERE audit_id=? AND item_id=? "
-                               "AND actionable=1 AND status IN ('pending','approved') "
-                               "AND kind IN ('manual','confirmed_target')", (audit_id, book.id))
-            result.append(quality_policy(report, report["human_decisions"], corrections + staged))
-        return result
+            result.append(report)
+        inventory = category_inventory(result, self.category_preferences(audit_id))
+        category_assessments(result, inventory)
+        return [quality_policy(r, r["human_decisions"], corrections_by_item[r["item_id"]] + staged_by_item[r["item_id"]])
+                for r in result]
 
     def cancel_verification(self, run_id):
         # A cancellation signal must be writable while the operation holder is making a read request.

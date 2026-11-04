@@ -51,16 +51,28 @@ def quality_policy(report, decisions=None, corrections=()):
         new_conflict = new_conflict or fresh_identity_conflict
         applicable = status != "Not applicable" and field != "embedded" and (field != "chapters" or status == "Conflict")
         required = field in ("title", "authors", "cover") or field == "narrators" and report["type"] == "audiobook"
+        cover = details.get("human_review") or {}
+        if field == "cover" and cover.get("state"):
+            valid = valid and cover.get("state") == "retrieved" and decision.get("source") == (
+                "cover:" + cover.get("content_digest", ""))
+        elif field == "cover" and decision.get("source", "").startswith("cover:"):
+            valid = False
         if outstanding or valid and decision.get("decision") == "correction_needed":
             disposition, reason = "Needs attention", "correction_outstanding"
         elif not applicable:
             disposition, reason = "Pass", "not_applicable" if status == "Not applicable" else "inspection_deferred"
         elif required and not value:
             disposition, reason = "Needs attention", "required_missing"
+        elif field == "cover" and cover.get("state") == "unavailable":
+            disposition, reason = "Needs attention", "cover_unavailable"
+        elif details.get("hygiene") == "category_problem":
+            disposition, reason = "Needs attention", "category_problem"
         elif valid and decision.get("decision") in ("unable", "later", "reopened"):
             disposition, reason = "Needs evidence", "human_unresolved"
         elif valid and decision.get("decision") == "confirmed" and not new_conflict:
             disposition, reason = "Pass", "human_confirmed"
+        elif details.get("hygiene") == "category_accepted":
+            disposition, reason = "Pass", "category_accepted"
         elif identity_conflicts:
             disposition, reason = "Needs attention", "identity_conflict"
         elif status in ("Conflict", "Missing"):
