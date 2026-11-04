@@ -18,8 +18,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 35
     env:
-      ABS_MM_DB: ${{ runner.temp }}/abs-mm/app.sqlite3
-      ABS_MM_SETTINGS: ${{ runner.temp }}/abs-mm/settings
+      ABS_MM_DB: ${{ github.workspace }}/.test-tmp-ci/app.sqlite3
+      ABS_MM_SETTINGS: ${{ github.workspace }}/.test-tmp-ci/settings
       STREAMLIT_BROWSER_GATHER_USAGE_STATS: 'false'
     steps:
       - uses: actions/checkout@v4
