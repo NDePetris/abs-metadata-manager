@@ -1,3 +1,26 @@
+# Phase 1 S1 foundation — 2026-11-04
+
+S1 changes CI, synthetic test isolation, recovery guidance and the development
+harness only. Application modules, schema, matching and write paths are unchanged.
+The README backup example is exercised against a synthetic WAL database with
+accepted decisions and an uncertain journal; the restored copy retains every table
+and remains blocked for reconciliation. No production database, credential, ABS
+server or Calibre library was used.
+
+Local Windows/Python 3.13.14 validation: **327 passed, 4 skipped in 877.91s**.
+Three official CLI simulator tests refused the existing personal CLI profile
+without reading its config; the private-export test was deliberately excluded.
+Ruff, `pip check`, `start.ps1 -Check`, sidecar references, documentation links and
+staged whitespace checks passed. The restricted-sandbox run was stopped after
+stalling; the successful full run used normal local temp/loopback permissions with
+the same synthetic fixtures and network guard. CI targets Python 3.12; GitHub
+Actions results must be checked on the PR and are not implied by this local run.
+
+Historical results below describe earlier sessions. They do not establish current
+production compatibility. The latest recorded unresolved write is operation 25;
+see [the incident](PRODUCTION_FIXES.md#existing-database-and-operation-25) and
+[backup/recovery procedure](../README.md#backup-restore-and-uncertain-writes).
+
 # Compact Match & Verify refinement — 2026-11-02
 
 Final full regression: **232 passed in 647.34 seconds**, no skips. Follow-up scoped Calibre/verification regressions also passed after the archive-only restriction on context-free catalogs. Ruff, pip check, launcher check, git diff --check and the native UI detector passed. A synthetic Windows DPAPI roundtrip, corrupt-blob recovery and forget also passed.

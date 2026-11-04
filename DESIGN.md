@@ -1,11 +1,52 @@
 # Design
 
-Practical native Streamlit desktop workspace. Retain the configured light theme; no custom CSS, animation, branding assets, or mobile-specific UI.
+Practical native Streamlit desktop workspace. Keep the configured light theme;
+no custom CSS, animation, branding assets, generated comps or mobile-specific UI.
+Desktop acceptance sizes are 1024×800 and 1280×800.
 
-The sidebar holds Library, five navigation choices, and connection status. Normal pages resolve the latest completed inventory internally. Historical snapshots are Advanced history tools.
+## Current implementation
 
-Match & Verify uses a searchable book selector with Previous/Next and a concise progress line. A compact candidate selector, plain-language classification, returned edition details and a shared action strip precede the Field / Current in ABS / Reference / Desired grid. Fields begin unselected; edits/copy/restore select just that field. One Confirm or Confirm & Next action atomically accepts selected drafts. Notes and secondary decisions disclose in More review actions. All diagnostics, raw/historical evidence, covers and source synchronization share Advanced / Evidence. Drafts are separate from widget state and scoped to server/library/audit/item/field. Human acceptance and independent assessment use compact text labels.
+The collapsed sidebar contains the single global Library selector, Import,
+Match & Verify, Changes, History and Settings, plus connection status. Normal
+pages use the latest completed inventory; historical snapshots are advanced tools.
 
-Changes groups confirmed targets and legacy human proposals by book. Selection, field write approval, exact preview, phrase, and acknowledgement precede guarded execution. Calibre validation is separate and read-only. History emphasizes chronological activity; journals and rollback are advanced controls, expanded when recovery is required.
+Match & Verify has a searchable book selector, Previous/Next, compact candidate
+selection and a Field / Current in ABS / Reference / Desired grid. Keep the three
+value columns readable together. Current is an imported snapshot, not a live read.
+Long text wraps; contributor order and multiple decimal series rows survive editing.
+Fields start unselected. Editing/copying selects a field but does not confirm it.
+Confirm or Confirm & Next accepts selected targets locally; changed targets enter
+Changes without write approval. Advanced / Evidence holds provenance, raw evidence,
+covers and source synchronization. Drafts are scoped to the exact browser session,
+server/library/import/item; compatible durable human decisions can survive imports.
 
-Desktop acceptance sizes: 1024×800 and 1280×800. Keep all three value columns readable together. The native sidebar starts collapsed to preserve desktop width; it holds the single global Library selector. Long scalar text wraps; structured series editing retains decimal strings and multiple rows. Missing file inspection displays Not checked and does not create a correction.
+Changes groups corrections by book. Field approval, exact preview, phrase and
+acknowledgement precede guarded execution. Calibre checks are separate and read-only.
+History emphasizes activity, with journals/rollback advanced and unresolved recovery
+prominent. Rendering/navigation perform no remote mutation.
+
+## Phase 1 target (not implemented in S1)
+
+The exception queue becomes the primary workflow, ordered/filterable by quality
+disposition and essential-field priority rather than requiring every field to be
+accepted manually:
+
+- **Pass:** strong explained evidence or explicit human confirmation supports the
+  existing applicable value. Show which basis applies; neither grants write approval.
+- **Needs attention:** required metadata is missing or conflicting; show the evidence
+  and affected fields. Optional absence alone is not an error.
+- **Needs evidence:** unavailable, ambiguous or inadequate evidence; make the gap
+  explicit. Unknown, review later and explicit exceptions cannot silently pass.
+
+Retain the compact Current / Reference / Desired editor for resolving exceptions.
+Show explanations, source/capture provenance and work versus recording scope near
+the decision. Work evidence cannot validate narrator credits. Keep assessment,
+human confirmation, staged correction and observed authoritative changes distinct.
+
+Integrate read-only cover gallery/review and genre/tag hygiene discovery into the
+same exception flow. Presence of a cover is not correctness; do not introduce
+cover/tag mutation controls. Calibre owns ebook corrections; later ABS observation
+is separate. Uninspected files remain Not checked, not automatic outstanding work.
+
+DESIGN.md is authoritative. The minimal `.impeccable/design.json` points here for
+design tooling; it is not another token system or screenshot evidence registry.

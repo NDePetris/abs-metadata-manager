@@ -1,4 +1,7 @@
 import copy
+import ipaddress
+import os
+import socket
 from pathlib import Path
 
 import pytest
@@ -83,8 +86,69 @@ PRIVATE = Path(__file__).parent / "fixtures" / "private" / "audit_snapshot.json"
 
 
 @pytest.fixture(autouse=True)
-def isolated_user_settings(tmp_path, monkeypatch):
+def isolated_user_settings(tmp_path, monkeypatch, cli_profile_path):
+    # Never inherit a developer's connection, database, provider keys or proxies.
+    for key in tuple(os.environ):
+        if key.startswith(("ABS_", "GOOGLE_BOOKS_", "CALIBRE_")) or key.upper() in {
+            "METADATA_CONTACT", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"
+        }:
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("ABS_MM_DB", str(tmp_path / "app.sqlite3"))
     monkeypatch.setenv("ABS_MM_SETTINGS", str(tmp_path / "preferences"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    monkeypatch.setenv("NETRC", str(tmp_path / "absent-netrc"))
+    test_home = tmp_path / "home"
+    test_home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: test_home))
     monkeypatch.setattr("abs_manager.config.cli_config", dict)
     monkeypatch.setattr("abs_manager.adapter.cli_config", dict)
     monkeypatch.setattr("abs_manager.preferences.credential", lambda *args, **kwargs: "")
+
+
+@pytest.fixture(scope="session")
+def cli_profile_path():
+    # Capture the real executable's profile before Python's home is isolated.
+    from scripts.diagnose_metadata_search import cli_profile
+    return cli_profile()
+
+
+@pytest.fixture(autouse=True)
+def loopback_only(monkeypatch):
+    """Fail before DNS or connection if a Python test attempts external traffic.
+
+    Official CLI subprocesses have separate clean-profile checks and receive
+    only the local simulator URL; Python socket patches cannot constrain them.
+    """
+    resolve = socket.getaddrinfo
+    connect = socket.socket.connect
+    connect_ex = socket.socket.connect_ex
+
+    def check(host):
+        if isinstance(host, bytes):
+            host = host.decode("ascii")
+        if host == "localhost":
+            return
+        try:
+            allowed = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            allowed = False
+        if not allowed:
+            raise AssertionError("Tests permit only literal loopback addresses or localhost")
+
+    def getaddrinfo(host, *args, **kwargs):
+        check(host)
+        return resolve(host, *args, **kwargs)
+
+    def guarded_connect(sock, address):
+        if sock.family in (socket.AF_INET, socket.AF_INET6):
+            check(address[0])
+        return connect(sock, address)
+
+    def guarded_connect_ex(sock, address):
+        if sock.family in (socket.AF_INET, socket.AF_INET6):
+            check(address[0])
+        return connect_ex(sock, address)
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)

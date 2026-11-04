@@ -2,6 +2,9 @@
 
 A local Windows desktop workspace using Python 3.12+, native Streamlit controls, SQLite, and abs-cli.
 
+See [PRODUCT.md](PRODUCT.md) for Phase 1 goals, [DESIGN.md](DESIGN.md) for current
+and planned workflows, and [AGENTS.md](AGENTS.md) for implementation boundaries.
+
 ## Start
 
 ```powershell
@@ -25,7 +28,7 @@ File metadata and folder verification display **Not checked** unless reliable ev
 
 ## Existing local database
 
-Stop the old app and back up `data/metadata.sqlite3` (or the path named by `ABS_MM_DB`). Start this version with the same database path. Schema changes are additive; snapshots, generic annotations, accepted decisions, corrections, and recovery journals remain. Do not delete the database to bypass recovery. Generic legacy annotations and proposals never become human acceptance automatically.
+Stop the old app and follow [Backup, restore and uncertain writes](#backup-restore-and-uncertain-writes) for `data/metadata.sqlite3` (or `ABS_MM_DB`). Start this version with the same database path. Schema changes are additive; snapshots, generic annotations, accepted decisions, corrections, and recovery journals remain. Do not delete the database to bypass recovery. Generic legacy annotations and proposals never become human acceptance automatically.
 
 For a cautious first inspection, set `ABS_MM_DB` to a private copy and `ABS_MM_SETTINGS` to a new private directory. Copy only the nonsecret `settings.json` into that directory (not any `.dpapi` files) before launching; this retains the server/library context while preventing saved-key reconnection. Review Import, Match & Verify, Changes, and History. Return to the original database for actual operation; a copied database has an independent lock, so do not operate both against the same server concurrently. No production write is necessary to inspect the redesign.
 
@@ -51,8 +54,15 @@ Automatic audio tag rewriting, remuxing, direct file inspection, renaming, new p
 
 ## Validation
 
+Fresh development environment (the launcher uses the same locked dependencies):
+
 ```powershell
-.\.venv\Scripts\python.exe -m pytest
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.lock.txt -e '.[dev]'
+```
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -ra --durations=10
 .\.venv\Scripts\python.exe -m ruff check app.py abs_manager tests
 .\.venv\Scripts\python.exe -m pip check
 .\start.ps1 -Check
@@ -60,6 +70,32 @@ git diff --check
 ```
 
 Tests use synthetic databases, fake providers and adapters, and the local HTTP simulator. UI tests replace the credential boundary with a fake. See [validation evidence](docs/VALIDATION.md) and [production safeguards](AGENTS.md).
+
+CI runs on PRs and pushes to main. Windows/Python 3.12 runs the full suite, Ruff,
+`pip check` and `start.ps1 -Check`; Linux/Python 3.12 runs focused transport,
+audit, guarded-write, locking and recovery regressions plus `pip check`. Prior
+full Windows runs took about 11–15 minutes, so Linux does not duplicate all
+Streamlit UI tests. No services, production secrets, CLI download or Calibre
+installation are needed. Both jobs install `requirements.lock.txt` with `.[dev]`;
+pip resolution and `pip check` catch inconsistent declarations.
+
+The harness clears inherited ABS/provider/Calibre/proxy environment settings,
+sets temporary Python home, app database/settings/local-app-data and netrc paths,
+replaces credential and CLI-config readers, and blocks Python DNS/connect/connect_ex outside
+loopback. This is a regression guard, not an OS sandbox for arbitrary subprocesses.
+Official CLI tests supply only synthetic tokens and loopback URLs and refuse to
+execute if the actual OS profile contains CLI config; Windows' known profile
+folder cannot safely be redirected by changing HOME/USERPROFILE.
+
+`-ra` reports skipped tests; JUnit artifacts retain their reasons. Without the
+official binary, the three `test_official_cli_*` tests in `test_adapter.py` skip:
+provider/search GET contract, apply/readback/rollback simulator, and transient
+read/resume protocol. Fake-adapter and direct-GET simulator tests still run.
+The historical private-export test is excluded by default even if a local file
+exists; its separate explicit opt-in is `ABS_MM_TEST_PRIVATE_EXPORT=1` and is
+never enabled in CI. Skips are coverage gaps, not passes. Do not claim Actions
+passed from local results. Recommend requiring both stable CI job checks in main
+branch protection after the first successful run; this PR does not configure it.
 
 
 To exercise the desktop fixtures without credentials or external requests:
@@ -69,3 +105,88 @@ To exercise the desktop fixtures without credentials or external requests:
 ```
 
 This harness uses only a fake ABS adapter, fake provider responses and `.test-tmp-compact` storage. See [compact-screen acceptance evidence](docs/COMPACT_REVIEW.md).
+
+## Backup, restore and uncertain writes
+
+Stop every app process using the workspace before backup or restore. Wait for any
+submitted operation to stop; interruption can leave durable intent requiring
+reconciliation. Retain the entire database, not just snapshots: it also contains
+decisions, evidence, approvals and write/rollback journals. The OS lock releases
+on process exit; it does not resolve journal state.
+
+Use SQLite's backup API to produce a consistent single-file copy. It includes
+committed WAL contents; copying only a live `.sqlite3` file can omit them. Do not
+delete `-wal`, `-shm` or `-journal` files. For a raw filesystem archive, stop all
+users and copy the database and every present sidecar as one set. A SHM file is
+coordination state, not a substitute for the WAL. Do not mix sets or copy them
+independently while the database is active.
+
+Example in PowerShell, with a **new private backup destination**. Substitute the
+actual source if `ABS_MM_DB` is configured. This opens the source read-only,
+refuses an existing destination and verifies the resulting backup without Store
+initialization or remote requests:
+
+```powershell
+@'
+import sqlite3, sys
+from pathlib import Path
+source, target = map(Path, sys.argv[1:])
+target.parent.mkdir(parents=True, exist_ok=True)
+with target.open('xb'):
+    pass
+with sqlite3.connect(source.resolve().as_uri() + '?mode=ro', uri=True) as src:
+    with sqlite3.connect(target) as dst:
+        src.backup(dst)
+        result = dst.execute('PRAGMA integrity_check').fetchall()
+        if result != [('ok',)]:
+            raise RuntimeError(result)
+print('Consistent backup verified:', target)
+'@ | .\.venv\Scripts\python.exe - 'data\metadata.sqlite3' 'data\backups\before-s1.sqlite3'
+```
+
+Also archive nonsecret `settings.json` from `ABS_MM_SETTINGS` or
+`%LOCALAPPDATA%\ABS Metadata Manager`. Record the original database path and app
+revision. Credentials are separate `.dpapi` blobs: retain them only in a protected
+same-user Windows backup if desired, or deliberately omit and re-enter the key.
+They are not portable credentials; never decrypt/export plaintext or commit any
+backup. Local DB backup does not replace backups of ABS `/config` and `/metadata`
+or the authoritative Calibre library.
+
+Restore while stopped. First preserve the current database and sidecars as a
+separate recovery set, even if damaged or uncertain. Verify the backup using the
+integrity check above (or read-only `PRAGMA integrity_check`). Copy the verified
+single-file API backup to a **new, unused** database path with no stale sidecars,
+then point `ABS_MM_DB` there before launching. For example:
+
+```powershell
+$restoredDb = Join-Path $PWD 'data\restored-s1.sqlite3'
+if (Test-Path -LiteralPath $restoredDb) { throw 'Choose an unused restore path.' }
+Copy-Item -LiteralPath 'data\backups\before-s1.sqlite3' -Destination $restoredDb
+$env:ABS_MM_DB = $restoredDb
+.\start.ps1
+```
+
+Keep only one active workspace against the server. Restore matching settings
+separately or reconnect explicitly. Inspect History, decisions and journals before
+any operation. A backup preserves history only up to its capture time: never use
+an older copy to bypass a later uncertain write. If later journals/decisions exist,
+retain the newer recovery set and resolve that history first; do not merge SQLite
+tables manually. If the latest intent is unavailable, stop and report the gap.
+
+Prepared/applied/uncertain operations require **History → Reconcile using live
+metadata (read-only)** against the original server. The workflow guards identity,
+library/path, all managed values and unrelated metadata/media. Intended after-state
+becomes verified; exact before-state becomes not_applied and resets its approval;
+mixed/unexpected state remains uncertain and blocks writes. A failed readback stays
+unresolved. Reconciliation updates the local journal but never resubmits the write.
+Any later correction needs deliberate approval and a fresh preview/confirmation;
+rollback is also a separately confirmed conditional write.
+
+A successful CLI submission/exit is not end-to-end verification. Require guarded
+readback and the operator's ABS check, including unrelated state. The last recorded
+production incident is **operation 25**, an approved empty subtitle returned as
+null. A scoped equivalence fix exists, but the operation remains uncertain in the
+recorded evidence; S1 does not inspect or resolve production state. Follow
+[the incident recovery steps](docs/PRODUCTION_FIXES.md#existing-database-and-operation-25)
+and [live validation](docs/LIVE_VALIDATION.md). Complete reconciliation before
+considering any separately authorized live write validation.
