@@ -43,7 +43,8 @@ Missing optional metadata is not automatically an error. An explicit exception,
 unknown or review-later decision is not an automatic pass. Assessment never
 stages, approves or applies a correction. Human acceptance, staged targets,
 preview-bound write approval and changes actually observed in ABS are separate.
-These target dispositions are planned, not implemented by S1 documentation.
+S2 derives these dispositions in verification reports, separately from the existing
+review-acceptance state. The exception-first queue remains deferred to S3.
 
 Keep one operation at a time under the cross-process workspace lock. A crash
 releases the OS lock, but journal intent remains. Prepared/applied/uncertain

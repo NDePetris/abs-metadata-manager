@@ -43,8 +43,10 @@ Calibre verification and later ABS sync observation are separate.
   compatibility; see [production incident](docs/PRODUCTION_FIXES.md).
 - Phase 1 S1 establishes CI, isolation, recovery guidance and this harness. It
   changes no matching, assessment semantics, schema or UI behavior.
-- Later Phase 1 sessions implement the exception queue, evidence-based quality
-  dispositions, cover review and genre/tag hygiene discovery within existing
+- S2 supplies deterministic quality dispositions and bounded explicit evidence
+  acquisition over existing snapshots; see [engine contract](docs/S2_ENGINE.md).
+- Later Phase 1 sessions implement the exception queue,
+  cover review and genre/tag hygiene discovery within existing
   protections. Cover/tag writers are not authorized by this roadmap.
 - Source portability (embedded tags, files, folders and sidecars), chapter
   remediation, new providers, AI adjudication and background work remain deferred.

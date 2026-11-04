@@ -25,6 +25,13 @@ acknowledgement precede guarded execution. Calibre checks are separate and read-
 History emphasizes activity, with journals/rollback advanced and unresolved recovery
 prominent. Rendering/navigation perform no remote mutation.
 
+S2 adds Read-only batch evidence inside Advanced / Evidence: selected or
+unattempted audiobooks, 1–25 books per invocation, explicit refresh, saved-run
+resume/cancel and unavailable retry. Coverage describes acquisition outcomes,
+separately from matches and quality. Ebooks retain existing Calibre comparisons.
+The existing review selector/editor is unchanged; S3 can consume the engine
+contract in [docs/S2_ENGINE.md](docs/S2_ENGINE.md).
+
 ## Phase 1 target (not implemented in S1)
 
 The exception queue becomes the primary workflow, ordered/filterable by quality
