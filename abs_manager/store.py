@@ -318,7 +318,7 @@ class Store(PersistentState):
                            (audit_id, item_id, field, compact(data)))
 
     def verification_report(self, audit_id):
-        from .verification import assess
+        from .verification import assess, quality_policy
         if self.audit(audit_id)["status"] != "complete":
             raise ValueError("Verification requires a completed audit snapshot.")
         catalogs = self.rows("SELECT data FROM calibre_catalogs WHERE audit_id=?", (audit_id,))
@@ -372,7 +372,10 @@ class Store(PersistentState):
                 report["review_status"] = "Unable to verify"
             else:
                 report["review_status"] = "Needs review"
-            result.append(report)
+            staged = self.rows("SELECT item_id,field,status FROM findings WHERE audit_id=? AND item_id=? "
+                               "AND actionable=1 AND status IN ('pending','approved') "
+                               "AND kind IN ('manual','confirmed_target')", (audit_id, book.id))
+            result.append(quality_policy(report, report["human_decisions"], corrections + staged))
         return result
 
     def cancel_verification(self, run_id):

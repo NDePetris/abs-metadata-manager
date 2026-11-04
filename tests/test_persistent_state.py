@@ -167,7 +167,7 @@ def test_new_id_and_unrelated_external_conflict_do_not_transfer_or_revoke(tmp_pa
         )
         db.execute("INSERT INTO verification_tasks VALUES(1,?,'{}','key',1)", (book["id"],))
     report = store.verification_report(first)[0]
-    assert report["fields"]["subtitle"]["status"] == "Conflict"
+    assert report["fields"]["subtitle"]["status"] == "Unverified"
     assert report["fields"]["subtitle"]["decision"]["decision"] == "confirmed"
     assert store.field_decisions(first, book["id"])["title"]["decision"] == "confirmed"
     replacement = copy.deepcopy(book)
