@@ -1,3 +1,28 @@
+# Compact Match & Verify refinement — 2026-11-02
+
+Final full regression: **232 passed in 647.34 seconds**, no skips. Follow-up scoped Calibre/verification regressions also passed after the archive-only restriction on context-free catalogs. Ruff, pip check, launcher check, git diff --check and the native UI detector passed. A synthetic Windows DPAPI roundtrip, corrupt-blob recovery and forget also passed.
+
+Actual browser captures at 1280×800 and 1024×800 measured a **79.3% reduction** in field review plus actions: 2484.13 px to 513.59 px. All five ordinary audiobook rows, the three value columns and Confirm & Next fit together with the sidebar collapsed. No horizontal overflow was observed. Long/complex books may scroll. Validation used isolated synthetic storage, fake providers/adapters and the loopback simulator; no production metadata or media mutation occurred.
+
+See [the full refinement report, measurements, screenshots and existing-database instructions](COMPACT_REVIEW.md). Earlier validation records follow.
+
+# Streamlined desktop workflow — 2026-11-02
+
+Baseline: updated main at 9e190c6, containing merged PR #3 (485f9b4). Branch: codex/streamlined-metadata-ux.
+
+- Final complete regression: **205 passed in 41.71 seconds**. Ruff, pip check, start.ps1 -Check, and git diff --check pass. The native UI detector returned no findings.
+- Tests retain the existing transport, audit, migration, write, recovery and rollback engine coverage. UI regressions were rewritten for the five navigation destinations and book-centric review. Added atomic staging, exact selected previews, expected narrator/Calibre identifier transitions, rejection persistence across provider changes, credential-boundary isolation, fixed Calibre subprocess arguments, and fake apply/rollback UI checks.
+- Narrator acceptance only carries through an exact verified journal transition whose protected metadata also matches the original snapshot. A regression confirms that an unexplained language change still reopens acceptance.
+- Desktop browser interaction used a separate ignored synthetic SQLite database and FakeAdapter, not the user's existing database or production connection. Import, Match & Verify, Changes, History, and Settings were inspected. Viewports included 1024×800 and 1280×800. Long titles, multiple authors, typed desired values, Next navigation, confirmation/staging, and a grouped queue were exercised. Search controls were collapsed and long title editing changed to a wrapping text area following inspection.
+- Screenshot evidence: [Match & Verify at 1024](screenshots/match-1024.jpg), [Changes at 1280](screenshots/changes-1280.jpg). Additional local captures cover Import, History and Settings.
+- Windows DPAPI encrypted/decrypted an in-memory synthetic test value successfully. No saved Windows or production credential was read for development. Automated preference tests use a fake encryption boundary and a private temporary directory.
+- The fixed calibredb list invocation and catalog reconciliation were tested with synthetic output/catalogs. Installed-Calibre compatibility, busy behavior, and real-library contents were not inspected. No production ABS write, Calibre write, file rewrite, or folder rename occurred.
+- The initial sandbox test attempts hit Windows temporary-directory/loopback restrictions. Successful final runs used normal local access and a separate local temporary directory. No safeguard was disabled to obtain passing results.
+
+Existing-database inspection instructions are in README.md. Stop the app and back up the database before additive migration. A disconnected private database copy can be used to inspect the UI; do not run independent databases concurrently against the same server.
+
+Historical validation records follow.
+
 # Validation record
 
 Development date: 2026-10-28, Windows x64, Python 3.13.14.

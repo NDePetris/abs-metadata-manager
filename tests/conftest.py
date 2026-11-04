@@ -80,3 +80,11 @@ def setup(tmp_path):
 
 
 PRIVATE = Path(__file__).parent / "fixtures" / "private" / "audit_snapshot.json"
+
+
+@pytest.fixture(autouse=True)
+def isolated_user_settings(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABS_MM_SETTINGS", str(tmp_path / "preferences"))
+    monkeypatch.setattr("abs_manager.config.cli_config", dict)
+    monkeypatch.setattr("abs_manager.adapter.cli_config", dict)
+    monkeypatch.setattr("abs_manager.preferences.credential", lambda *args, **kwargs: "")

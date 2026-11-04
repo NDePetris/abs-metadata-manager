@@ -265,30 +265,30 @@ class Store(PersistentState):
         rows = self.rows("SELECT l.data FROM verification_tasks t JOIN verification_runs r ON r.id=t.run_id "
                          "JOIN verification_lookups l ON l.id=t.lookup_id WHERE r.audit_id=? AND t.item_id=? "
                          "ORDER BY r.id DESC", (audit_id, item_id))
-        if not rows:
-            audit = self.audit(audit_id)
-            book = self.book(audit_id, item_id)
-            from .persistent_state import identity
-            previous = self.rows("SELECT b.raw, b.audit_id FROM books b JOIN audits a ON a.id=b.audit_id "
-                                 "WHERE a.server=? AND a.library=? AND a.status='complete' AND a.id<? "
-                                 "AND b.item_id=? ORDER BY a.id DESC", (audit["server"], audit["library"], audit_id, item_id))
-            for old in previous:
-                prior = Book(json.loads(old["raw"]))
-                if identity(prior) == identity(book) and prior.values == book.values:
-                    rows = self.rows("SELECT l.data FROM verification_tasks t JOIN verification_runs r ON r.id=t.run_id "
-                                     "JOIN verification_lookups l ON l.id=t.lookup_id WHERE r.audit_id=? AND t.item_id=? "
-                                     "ORDER BY r.id DESC", (old["audit_id"], item_id))
-                    if rows:
-                        break
-                else:
-                    break
+        audit = self.audit(audit_id)
+        book = self.book(audit_id, item_id)
+        from .persistent_state import identity
+        known = {json.loads(r["data"])["source"] for r in rows}
+        previous = self.rows("SELECT b.raw,b.audit_id FROM books b JOIN audits a ON a.id=b.audit_id "
+                             "WHERE a.server=? AND a.library=? AND a.status='complete' AND a.id<? AND b.item_id=? ORDER BY a.id DESC",
+                             (audit["server"], audit["library"], audit_id, item_id))
+        for old in previous:
+            prior = Book(json.loads(old["raw"]))
+            if identity(prior) != identity(book) or prior.values != book.values:
+                break
+            captured = self.rows("SELECT l.data FROM verification_tasks t JOIN verification_runs r ON r.id=t.run_id "
+                                 "JOIN verification_lookups l ON l.id=t.lookup_id WHERE r.audit_id=? AND t.item_id=? ORDER BY r.id DESC",
+                                 (old["audit_id"], item_id))
+            missing = [r for r in captured if json.loads(r["data"])["source"] not in known]
+            rows.extend(missing)
+            known.update(json.loads(r["data"])["source"] for r in missing)
         latest = {}
         for row in rows:
             data = json.loads(row["data"])
             key = (data["source"], data["scope"])
             if key not in latest:
                 latest[key] = data
-            elif latest[key]["state"] == "unavailable" and data["state"] in ("ok", "no_match") and data[
+            elif latest[key]["state"] == "unavailable" and data["state"] in ("ok", "partial", "no_match") and data[
                     "query"] == latest[key]["query"]:
                 latest[key].setdefault("previous_success", data)
         return list(latest.values())
@@ -344,9 +344,24 @@ class Store(PersistentState):
                                         and current_choice["decision"] == "absent" else None)
             for field, details in report["fields"].items():
                 details["decision"] = report["human_decisions"].get(field)
-            relevant = [d for d in report["fields"].values() if d["status"] != "Not applicable"]
-            pending = [d for d in relevant if not (d["decision"] and d["decision"]["valid"]
-                       and d["decision"]["decision"] == "confirmed")]
+            from .models import review_fields
+            from .persistent_state import identity
+            relevant = [report["fields"][f] for f in review_fields(book.is_audio)]
+            # Confirmed targets are human acceptance even before application.
+            # A generic correction-needed decision without that exact durable
+            # accepted target is still unfinished. Keep this rule in the report.
+            corrections = self.corrections(audit_id)
+            for field in review_fields(book.is_audio):
+                details = report["fields"][field]
+                d = details["decision"]
+                details["review_accepted"] = bool(d and d["valid"] and (
+                    d["decision"] == "confirmed" or d["decision"] == "correction_needed" and any(
+                        c["item_id"] == book.id and c["field"] == field and c["accepted"]
+                        and c["audit_id"] == d["audit_id"] and c["created"] >= d["created"]
+                        and c["identity_digest"] == identity(book, field) and c["current"] == d["value"]
+                        and c["status"] in ("pending", "edited_in_calibre", "verified_in_calibre")
+                        for c in corrections)))
+            pending = [d for d in relevant if not d["review_accepted"]]
             if any(d["decision"] and d["decision"]["valid"] and d["decision"]["decision"] == "correction_needed" for d in pending):
                 report["review_status"] = "Correction needed"
             elif pending and report["match_classification"] in ("different_recording", "wrong_work"):

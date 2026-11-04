@@ -13,12 +13,14 @@ from typing import Protocol
 import requests
 
 from .config import ROOT, Settings, cli_config
-from .diagnostics import event, identifier, local_log, stderr_summary
+from .diagnostics import event, identifier, local_log, response_shape, stderr_summary
 from .models import Book, payload
 
 
 class AdapterError(RuntimeError):
-    pass
+    def __init__(self, message, diagnostic=None):
+        super().__init__(message)
+        self.diagnostic = diagnostic
 
 
 class InventoryChanged(AdapterError):
@@ -36,7 +38,7 @@ class Adapter(Protocol):
 
 
 class CliAdapter:
-    """Small CLI-only metadata transport. Credentials go through the child environment."""
+    """CLI transport, with GET-only metadata search bypassing 1.2.0's raw-response bug."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -63,7 +65,8 @@ class CliAdapter:
             if flag in args:
                 target[key] = identifier(args[args.index(flag) + 1], self.settings.token)
         env = dict(os.environ, ABS_SERVER=self.server, ABS_TOKEN=self.settings.token, ABS_DEBUG="0")
-        for attempt in range(1, (3 if readonly else 1) + 1):
+        attempts = 3 if readonly and args[:1] != ["metadata"] else 1
+        for attempt in range(1, attempts + 1):
             self._pace()
             record = {"operation": operation, **target, "attempt": attempt, "retry_count": attempt - 1,
                       "duration": 0.0, "exit_code": None, "category": "pending", "state": "requesting"}
@@ -92,6 +95,8 @@ class CliAdapter:
                         category = "connection_reset"
                     elif re.search(r"ETIMEDOUT|timed out|timeout", detail, re.IGNORECASE):
                         category = "timeout"
+                    elif re.search(r"ECONNREFUSED|ENOTFOUND|EAI_AGAIN", detail, re.IGNORECASE):
+                        category = "connection_reset"
                     else:
                         category = "cli_error"
                 else:
@@ -99,6 +104,7 @@ class CliAdapter:
                         value = json.loads(result.stdout) if parse else result.stdout.strip()
                     except ValueError:
                         category = "malformed_response"
+                        record["response_shape"] = response_shape(result.stdout)
                     if category == "ok" and validate:
                         try:
                             validate(value)
@@ -110,7 +116,7 @@ class CliAdapter:
                 category = "connection_reset"
             except OSError:
                 category = "executable_error"
-            retry = readonly and attempt < 3 and category in {"timeout", "connection_reset", "transient_http"}
+            retry = readonly and attempt < attempts and category in {"timeout", "connection_reset", "transient_http"}
             record.update(duration=round(time.monotonic() - started, 3), exit_code=code, category=category,
                           stderr=detail, state="retrying" if retry else "ok" if category == "ok" else "failed")
             event(self.log, **record)
@@ -129,7 +135,7 @@ class CliAdapter:
                 message += " A submitted update may have reached the server; reconcile History."
             elif readonly:
                 message += " Read-only request; saved audit progress is retained."
-            raise AdapterError(message) from None
+            raise AdapterError(message, record.copy()) from None
 
     def probe(self) -> dict:
         self.version = self._run(["--version"], parse=False)
@@ -207,18 +213,55 @@ class CliAdapter:
         return sorted(providers, key=lambda p: (not any(
             x in (p["value"] + p.get("text", "")).lower() for x in ("audible", "audnexus")), p["value"]))
 
-    def metadata_search(self, provider: str, query: dict) -> list[dict]:
+    def metadata_search(self, provider: str, query: dict) -> list:
         if not provider or not query.get("title"):
             raise ValueError("Select a discovered provider and a nonempty title/ASIN.")
-        args = ["metadata", "search", "--provider", provider, "--title", query["title"]]
-        if query.get("author"):
-            args += ["--author", query["author"]]
-        response = self._run(args)
+        response = self._metadata_search_json(provider, query)
         if not isinstance(response, list):
-            raise AdapterError("Unexpected metadata search schema (expected candidate array).")
-        if not all(isinstance(row, dict) for row in response):
-            raise AdapterError("Invalid metadata search candidate.")
+            raise AdapterError("Unexpected metadata search schema (expected candidate array).",
+                               {"category": "invalid_schema", "stderr": "HTTP 200", "transport": "direct_get"})
+        # Source processing diagnoses each element and can retain partial results.
         return response
+
+    def _metadata_search_json(self, provider: str, query: dict):
+        # One explicit GET; never retry, follow login redirects, load .netrc,
+        # refresh tokens, or silently fall back to the CLI/another provider.
+        # abs-cli 1.2.0 prints raw bodies with exit 0 and can return a stale 401
+        # body after successful auth retry. Other reads and every write stay CLI.
+        self._pace()
+        record = {"operation": "metadata search", "transport": "direct_get", "exit_code": None}
+        try:
+            with requests.Session() as session:
+                session.trust_env = False
+                session.headers.clear()
+                session.headers.update({"Authorization": "Bearer " + self.settings.token,
+                                        "User-Agent": "abs-cli/1.2.0"})
+                response = session.get(self.server + "/api/search/books",
+                                       params={"provider": provider, "title": query["title"],
+                                               **({"author": query["author"]} if query.get("author") else {})},
+                                       timeout=self.settings.timeout, allow_redirects=False)
+            status = response.status_code
+            record["stderr"] = f"HTTP {status}"
+            if not 200 <= status < 300:
+                category = ("authorization" if status in (401, 403) else "transient_http"
+                            if status in (429, 502, 503, 504) else "permanent_http")
+            else:
+                try:
+                    value = json.loads(response.content)
+                    if isinstance(value, list):
+                        return value
+                    category = "invalid_schema"
+                    record["response_shape"] = response_shape(response.content)
+                except (ValueError, UnicodeDecodeError):
+                    category = "malformed_response"
+                    record["response_shape"] = response_shape(response.content)
+        except requests.Timeout:
+            category = "timeout"
+        except requests.RequestException:
+            category = "connection_reset"
+        record["category"] = category
+        event(self.log, **record)
+        raise AdapterError(f"metadata search failed: {category}. No retry submitted.", record) from None
 
     @staticmethod
     def _schema(response, key):
@@ -259,7 +302,8 @@ class PublicMetadataTransport:
         if source not in ("openlibrary", "googlebooks"):
             raise ValueError("Unsupported source.")
         if source == "googlebooks" and not self.google_key:
-            raise AdapterError("Google Books requires a configured API key; ABS and Open Library need none.")
+            raise AdapterError("Google Books requires a configured API key; ABS and Open Library need none.",
+                               {"category": "configuration"})
         url = {"openlibrary": "https://openlibrary.org/search.json",
                "googlebooks": "https://www.googleapis.com/books/v1/volumes"}[source]
         params = dict(query)
@@ -294,6 +338,42 @@ class PublicMetadataTransport:
             except (requests.RequestException, ValueError, TypeError):
                 # requests exceptions can include the URL/API key. Never propagate them.
                 raise AdapterError("Public provider unavailable: HTTP failure, rate limit, or invalid response.") from None
+
+
+def probe_metadata_search(settings: Settings, provider: str, query: dict) -> dict:
+    """Explicit diagnostic only: one GET, no redirects, netrc, cookies, retries or raw output.
+
+    Kept in the production transport module. Never invoked by rendering/search
+    fallback; the operator supplies a key to the separate diagnostic command.
+    """
+    if not provider or not query.get("title") or set(query) - {"title", "author"}:
+        raise ValueError("Supply a provider and title, with optional author only.")
+    with requests.Session() as session:
+        session.trust_env = False  # Do not load .netrc credentials or credential-bearing proxy settings.
+        session.headers.clear()
+        session.headers.update({"Authorization": "Bearer " + settings.token, "User-Agent": "abs-cli/1.2.0"})
+        try:
+            with session.get(settings.server + "/api/search/books", params={"provider": provider, **query},
+                             timeout=settings.timeout, allow_redirects=False, stream=True) as response:
+                content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+                encoding = response.headers.get("Content-Encoding", "").strip().lower()
+                body = bytearray()
+                limit = 2_000_000
+                for chunk in response.iter_content(65536):
+                    body.extend(chunk[:limit + 1 - len(body)])
+                    if len(body) > limit:
+                        break
+                return {"transport": "direct_get", "http_status": response.status_code,
+                        "redirect": response.is_redirect,
+                        "content_type": content_type if content_type in {
+                            "application/json", "text/json", "text/html", "text/plain"} else "other_or_missing",
+                        "content_encoding": encoding if encoding in {"", "gzip", "br", "deflate"} else "other",
+                        "truncated": len(body) > limit,
+                        "response_shape": response_shape(bytes(body))}
+        except requests.Timeout:
+            return {"transport": "direct_get", "category": "timeout"}
+        except requests.RequestException:
+            return {"transport": "direct_get", "category": "connection_or_http_decoding_error"}
 
 
 def membership(adapter: Adapter, library: str, progress: Callable = lambda *args: None, limit=50) -> dict:

@@ -304,7 +304,7 @@ def test_public_and_abs_schemas_and_units():
     assert custom.search(custom.query(book()))["candidates"][0]["work_only"]
 
 
-def test_cli_providers_search_argv_and_schema(monkeypatch):
+def test_cli_providers_and_direct_search_schema(monkeypatch):
     adapter = CliAdapter(Settings("http://test.invalid", "synthetic", "fake"))
     calls = []
 
@@ -315,12 +315,30 @@ def test_cli_providers_search_argv_and_schema(monkeypatch):
         return FIXTURES["abs"]
 
     monkeypatch.setattr(adapter, "_run", run)
+    monkeypatch.setattr(adapter, "_pace", lambda: None)
+    gets = []
+    body = FIXTURES["abs"]
+
+    def get(session, url, **kwargs):
+        assert not session.trust_env
+        assert session.headers["Authorization"] == "Bearer synthetic"
+        gets.append((url, kwargs))
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps(body).encode()
+        return response
+
+    monkeypatch.setattr(requests.Session, "get", get)
     assert adapter.metadata_providers()[0]["value"] == "audible"
     assert adapter.metadata_search("audible", {"title": "B012345678", "author": "Author"}) == FIXTURES["abs"]
-    assert calls[-1] == ["metadata", "search", "--provider", "audible", "--title", "B012345678", "--author", "Author"]
-    monkeypatch.setattr(adapter, "_run", lambda *args: {"invalid": []})
+    assert calls == [["metadata", "providers"]]
+    assert gets == [("http://test.invalid/api/search/books", {
+        "params": {"provider": "audible", "title": "B012345678", "author": "Author"},
+        "timeout": 90, "allow_redirects": False})]
+    body = {"invalid": []}
     with pytest.raises(AdapterError):
         adapter.metadata_search("audible", {"title": "title"})
+    assert len(gets) == 2 and calls == [["metadata", "providers"]]
 
 
 @pytest.mark.parametrize("failure", ["timeout", "rate", "bad", "auth"])
@@ -364,9 +382,12 @@ def test_calibre_authoritative_readonly_import(setup):
     raw.update(relPath="Author/Example trunc (653)", path="Author/Example trunc (653)")
     raw["media"].update(audioFiles=[], duration=0)
     store.add_book(aid, Book(raw))
-    text = json.dumps([{"id": 653, "title": "Authoritative title", "authors": ["Author One", "Author Two"],
+    text = json.dumps([{"id": 653, "uuid": "fixture-uuid", "title": "Authoritative title", "authors": ["Author One", "Author Two"],
                         "series": "Example Series", "series_index": 2.5, "identifiers": {"isbn": "9780306406157"}}])
-    assert import_catalog(store, aid, text) == 1
+    assert import_catalog(store, aid, text) == 0  # Folder ID alone cannot override contradictory work evidence.
+    store.confirm_targets(aid, "ebook", {"title": "Authoritative title", "authors": ["Author One", "Author Two"]})
+    assert import_catalog(store, aid, text, "fixture-library",
+                          {"ebook": {"id": 653, "uuid": "fixture-uuid"}}) == 1
     report = next(b for b in store.verification_report(aid) if b["item_id"] == "ebook")
     assert report["calibre_limitation"] is None
     assert report["fields"]["title"]["status"] == "Conflict"

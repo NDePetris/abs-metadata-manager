@@ -52,14 +52,17 @@ def test_calibre_confirmation_and_abs_observation(tmp_path):
     book["media"]["audioFiles"] = []
     first = snapshot(store, [book])
     cid = store.queue_correction(first, book["id"], "title", "Correct title", "catalog evidence", 12)
+    store.confirm_targets(first, book["id"], {"title": "Correct title"})
+    cid = store.corrections(first)[0]["id"]
     store.mark_calibre_edited(cid)
 
     def catalog(title):
-        return json.dumps([{"id": 12, "title": title, "authors": ["Dennis E. Taylor"]}])
+        return json.dumps([{"id": 12, "uuid": "fixture-uuid", "title": title, "authors": ["Dennis E. Taylor"]}])
 
-    import_catalog(store, first, catalog("Old title"))
+    import_catalog(store, first, catalog("Old title"), "fixture-library")
     assert store.corrections(first)[0]["status"] == "edited_in_calibre"
-    import_catalog(store, first, catalog("Correct title"))
+    import_catalog(store, first, catalog("Correct title"), "fixture-library",
+                   {book["id"]: {"id": 12, "uuid": "fixture-uuid"}})
     row = store.corrections(first)[0]
     assert row["calibre_verified"] and not row["abs_observed"]
     assert len(store.rows("SELECT * FROM calibre_catalog_history")) == 2
@@ -199,10 +202,12 @@ def test_pending_calibre_correction_can_be_verified_without_claim(tmp_path):
     book["media"]["audioFiles"] = []
     first = snapshot(store, [book])
     store.queue_correction(first, book["id"], "title", "Fixed", "evidence", 12)
-    export = lambda title: json.dumps([{"id": 12, "title": title, "authors": ["Dennis E. Taylor"]}])
-    import_catalog(store, first, export("Wrong"))
+    export = lambda title: json.dumps([{"id": 12, "uuid": "fixture-uuid", "title": title, "authors": ["Dennis E. Taylor"]}])
+    import_catalog(store, first, export("Wrong"), "fixture-library")
     assert store.corrections(first)[0]["status"] == "pending"
-    import_catalog(store, first, export("Fixed"))
+    store.confirm_targets(first, book["id"], {"title": "Fixed"})
+    import_catalog(store, first, export("Fixed"), "fixture-library",
+                   {book["id"]: {"id": 12, "uuid": "fixture-uuid"}})
     assert store.corrections(first)[0]["status"] == "verified_in_calibre"
     catalogs = store.rows("SELECT data FROM calibre_catalog_history ORDER BY id")
     assert [json.loads(c["data"])[0]["title"] for c in catalogs] == ["Wrong", "Fixed"]

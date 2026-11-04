@@ -1,34 +1,30 @@
 from __future__ import annotations
 
-import csv
-import io
 import json
 import os
 
 import streamlit as st
-from dotenv import load_dotenv
 
+from abs_manager import preferences
 from abs_manager.adapter import AdapterError, CliAdapter
-from abs_manager.audit import analyze
+from abs_manager.changes_ui import changes_view
 from abs_manager.config import ROOT, Settings, defaults
 from abs_manager.locking import BusyError, operation_lock
-from abs_manager.models import FIELDS, compact, digest
-from abs_manager.resolution_ui import correction_queue, persistent_history, resolution_view
+from abs_manager.models import digest
 from abs_manager.sample import sample_audit
 from abs_manager.store import Store
-from abs_manager.verification_ui import verification_view
+from abs_manager.verification_ui import discover_providers, verification_view
 from abs_manager.workflow import (
     SafetyError,
     Workflow,
     confirmation,
     import_previous,
-    preview,
+    operation_comparison,
     resume_unavailable,
     run_audit,
 )
 
-load_dotenv(ROOT / ".env")
-st.set_page_config(page_title="Audiobookshelf Metadata Manager", layout="wide", initial_sidebar_state="auto")
+st.set_page_config(page_title="Audiobookshelf Metadata Manager", layout="wide", initial_sidebar_state="collapsed")
 
 
 def display(value):
@@ -40,10 +36,6 @@ def display(value):
 def flash(message):
     st.session_state["flash"] = message
     st.rerun()
-
-
-def parse_editor(field, text):
-    return text if field in ("title", "subtitle") else json.loads(text)
 
 
 def progress_bar():
@@ -79,16 +71,18 @@ def audit_action(store, adapter, library, resume_id=None):
 
 def settings_view(store):
     st.title("Connection & settings")
-    st.write("Connect to your Audiobookshelf server with an API key. Credentials stay in this session.")
-    d = defaults()
+    st.write("Connect to your Audiobookshelf server with an API key. Saved keys use Windows user-scoped encryption. Same-user code may retrieve them.")
+    d = {**defaults(), **preferences.load()}
     # Widget keys belong to Streamlit; connection_result/error are application state.
     with st.form("settings_connection_form"):
         server = st.text_input("Server URL", value=d["server"], placeholder="http://your-server:13378")
-        token = st.text_input("API key", value=d["token"], type="password", help="Uses ABS_TOKEN or abs-cli config when available.")
-        executable = st.text_input("abs-cli executable", value=d["executable"])
-        c1, c2 = st.columns(2)
-        interval = c1.number_input("Seconds between CLI calls", min_value=0.1, value=d["interval"], step=0.1)
-        timeout = c2.number_input("CLI timeout (seconds)", min_value=5.0, value=d["timeout"], step=5.0)
+        token = st.text_input("API key", value="", type="password", help="Enter a key, or leave blank to use this server’s saved Windows-encrypted key.")
+        remember = st.checkbox("Remember API key with Windows encryption", value=True)
+        with st.expander("Advanced CLI settings"):
+            executable = st.text_input("abs-cli executable", value=d["executable"])
+            c1, c2 = st.columns(2)
+            interval = c1.number_input("Seconds between CLI calls", min_value=0.1, value=d["interval"], step=0.1)
+            timeout = c2.number_input("CLI timeout (seconds)", min_value=5.0, value=d["timeout"], step=5.0)
         connect = st.form_submit_button("Connect & check compatibility", type="primary")
     if connect:
         # Invalidate the prior connection before attempting another server.
@@ -96,10 +90,16 @@ def settings_view(store):
             st.session_state.pop(key, None)
         try:
             with operation_lock(store.path), st.spinner("Checking CLI commands and reading libraries…"):
-                adapter = CliAdapter(Settings(server, token, executable, interval, timeout))
+                adapter = CliAdapter(Settings(server, token or preferences.credential(server), executable, interval, timeout))
                 result = adapter.probe()
+            discover_providers(store, adapter)
+            if remember and token:
+                preferences.credential(server, token)
+            preferences.save({**preferences.load(), "server": adapter.server, "executable": executable})
+            st.session_state["server"] = adapter.server
             st.session_state["adapter"] = adapter
             st.session_state["connection_result"] = result
+            st.session_state.pop("credential_error", None)
         except (AdapterError, BusyError, ValueError, KeyError) as exc:
             st.session_state["connection_error"] = str(exc)
         # Refresh the sidebar too, including when replacing a successful connection fails.
@@ -109,26 +109,25 @@ def settings_view(store):
     connection = st.session_state.get("connection_result")
     adapter = st.session_state.get("adapter")
     if connection and adapter:
-        st.success("Connected. Select an audiobook library below.")
+        st.success("Connected. Use Library in the sidebar throughout the workspace.")
         st.write(f"**Server:** {adapter.server} · **ABS:** {connection['server_version']} · "
                  f"**abs-cli:** {connection['cli_version']}")
         for warning in connection["warnings"]:
             st.warning(warning)
-        libraries = [lib for lib in connection["libraries"] if lib.get("mediaType") == "book"]
-        if libraries:
-            ids = [lib["id"] for lib in libraries]
-            saved_library = st.session_state.get("library", {}).get("id", d["library"])
-            chosen = st.selectbox("Book library", ids, index=ids.index(saved_library) if saved_library in ids else 0,
-                                  format_func=lambda key: next(lib["name"] for lib in libraries if lib["id"] == key),
-                                  key="library_choice")
-            st.session_state["library"] = next(lib for lib in libraries if lib["id"] == chosen)
-            st.caption("ABS uses mediaType=book for audiobooks and ebooks. Audio items are writable; ebooks stay read-only.")
-            if "book" in st.session_state["library"]["name"].casefold() and "audio" not in st.session_state["library"]["name"].casefold():
-                st.warning("This library name suggests ebooks. Verify your selection; Calibre-managed ebooks remain read-only.")
         if st.button("Disconnect"):
             for key in ("adapter", "connection_result", "connection_error", "library"):
                 st.session_state.pop(key, None)
             st.rerun()
+    with st.form("calibre_settings"):
+        prefs = preferences.load()
+        calibre_executable = st.text_input("Calibre executable", value=prefs.get("calibre_executable", "calibredb"))
+        calibre_library = st.text_input("Calibre library folder", value=prefs.get("calibre_library", ""))
+        if st.form_submit_button("Save Calibre settings"):
+            preferences.save({**prefs, "calibre_executable": calibre_executable, "calibre_library": calibre_library})
+    if st.button("Forget saved API key", disabled=not d.get("server")):
+        preferences.credential(d["server"], forget=True)
+        st.session_state.pop("credential_error", None)
+        st.success("Saved API key forgotten. Enter a new key to reconnect.")
     st.divider()
     st.subheader("Local data")
     st.code(store.path, language=None)
@@ -176,24 +175,29 @@ def library_view(store):
     adapter, library = st.session_state.get("adapter"), st.session_state.get("library")
     if adapter and library:
         st.write(f"**Connected:** {adapter.server} / {library['name']}")
-        if st.button("Audit whole library", type="primary"):
+        if st.button("Refresh Library", type="primary"):
             with st.spinner("Reading pages and expanded items, one call at a time…"):
                 audit_action(store, adapter, library)
         st.caption("New imports expire write approvals and preserve valid field acceptance. Resume continues the same incomplete snapshot. "
                    "Use Streamlit’s Stop control to interrupt; incomplete audits cannot be approved or applied.")
     else:
-        st.info("Open Settings to connect and select your audiobook library.")
-    audit = choose_snapshot(store)
+        st.info("Connect in Settings, then use Library in the sidebar.")
+    audit = active_inventory(store)
+    attempt = store.latest(adapter.server, library["id"]) if adapter and library else None
+    if attempt and attempt["status"] != "complete":
+        audit = attempt
     if audit is None:
         st.subheader("Your first audit")
-        st.write("Connect in Settings, select the audiobook library, and choose Audit whole library.")
+        st.write("Connect in Settings, choose Library in the sidebar, then Refresh Library.")
         if st.button("Load read-only sample library"):
             aid = import_previous(store, sample_audit(), "Synthetic sample library")
             st.session_state["snapshot_choice"] = aid
+            preferences.save({"server": "offline://previous-export", "library": "offline"})
             flash("Loaded six synthetic examples. No server connection or metadata writes.")
         return
     books = store.books(audit["id"])
     if audit["status"] == "complete":
+        st.caption(f"Last successful import: {audit['finished'][:16].replace('T', ' ')} UTC · {len(books)} books")
         summary = store.import_summary(audit["id"])
         st.subheader("Import comparison")
         st.write(f"{summary['new']} new · {summary['removed']} removed · {summary['changed']} changed · "
@@ -221,12 +225,12 @@ def library_view(store):
         st.error(f"Latest audit error: {audit['error']}")
     if audit["status"] in ("running", "interrupted") and not audit["read_only"]:
         reason = resume_unavailable(store, audit, adapter.server, library) if adapter and library else (
-            "Connect to the original server and select the original library in Settings.")
+            "Connect to the original server and choose the original Library in the sidebar.")
         if reason:
             st.info(f"Resume unavailable: {reason}")
         else:
             st.caption("Resume checks current membership and saved identities/paths before reusing books. A changed library requires a fresh audit.")
-        if st.button("Resume audit", disabled=bool(reason)):
+        if st.button("Resume Import", disabled=bool(reason)):
             audit_action(store, adapter, library, resume_id=audit["id"])
             st.rerun()
     slow = json.loads(audit["slow_requests"])
@@ -238,134 +242,8 @@ def library_view(store):
         else:
             st.caption("No item timings recorded for this snapshot.")
     if books and sum(not b.is_audio for b in books) > len(books) / 2:
-        st.warning("This selected library appears to contain mostly ebooks. Check the library selection in Settings. "
+        st.warning("This selected library appears to contain mostly ebooks. Check Library in the sidebar. "
                    "Ebooks remain read-only; Calibre is authoritative.")
-    findings = store.findings(audit["id"])
-    st.write(f"**{len(books)} books** · {sum(b.is_audio for b in books)} with audio · "
-             f"{sum(f['actionable'] for f in findings)} correction proposals · "
-             f"{sum(not f['actionable'] for f in findings)} observations")
-    query = st.text_input("Search titles, authors, narrators, or paths").casefold()
-    filtered = [b for b in books if query in compact(b.values).casefold() or query in
-                (b.raw.get("relPath") or b.raw.get("path", "")).casefold()]
-    if not filtered:
-        st.info("No books match this search.")
-        return
-    st.dataframe([{"Title": b.values["title"], "Authors": ", ".join(b.values["authors"]),
-                   "Narrators": ", ".join(b.values["narrators"]), "Series": display(b.values["series"]),
-                   "Type": "Audiobook" if b.is_audio else "Ebook · read-only",
-                   "Cover": "Present" if b.raw["media"].get("coverPath") else "Missing"} for b in filtered],
-                 hide_index=True, width="stretch")
-    selected = st.selectbox("Inspect book", [b.id for b in filtered],
-                            format_func=lambda key: next(b.values["title"] or key for b in filtered if b.id == key))
-    book = next(b for b in filtered if b.id == selected)
-    left, right = st.columns([2, 1])
-    with left:
-        st.subheader(book.values["title"] or "Untitled book")
-        st.write(book.raw.get("relPath") or book.raw["path"])
-        st.json(book.values)
-        with st.expander("Normalized values and evidence"):
-            normalized, fs = analyze(book)
-            st.write("Normalized values are analytical evidence; they are never applied automatically.")
-            st.json({"normalized": normalized, "evidence": fs[0].evidence if fs else {},
-                     "chapter_names": [c.get("title") for c in book.raw["media"].get("chapters", [])]})
-        with st.expander("Observed item JSON"):
-            st.json(book.raw)
-    with right:
-        if book.raw["media"].get("coverPath"):
-            if adapter and adapter.server == audit["server"] and st.button("Load cover preview"):
-                with operation_lock(store.path):
-                    image_bytes = adapter.cover(book.id)
-                st.image(image_bytes, width=220)
-            else:
-                st.caption("Cover present in snapshot. Load its preview when connected to the source server.")
-        else:
-            st.caption("No cover found.")
-
-
-def review_view(store, audit=None):
-    st.write("Inspect audiobook correction proposals. Only explicit field approval adds a correction to Update Sources.")
-    audit = audit or choose_snapshot(store)
-    if audit is None:
-        st.info("Run an audit from Import to start reviewing.")
-        return
-    aid = audit["id"]
-    findings = store.findings(aid)
-    books = {b.id: b for b in store.books(aid)}
-    can_review = audit["status"] == "complete" and not audit["read_only"] and store.latest(
-        audit["server"], audit["library"])["id"] == aid
-    cols = st.columns(3)
-    fields = cols[0].multiselect("Fields", sorted({f["field"] for f in findings}))
-    confidence = cols[1].multiselect("Confidence", sorted({f["confidence"] for f in findings}))
-    statuses = cols[2].multiselect("Review status", sorted({f["status"] for f in findings}))
-    corrections_only = st.checkbox("Show correction proposals only", value=True)
-    filtered = [f for f in findings if (not fields or f["field"] in fields)
-                and (not confidence or f["confidence"] in confidence)
-                and (not statuses or f["status"] in statuses) and (f["actionable"] or not corrections_only)]
-    st.caption(f"{len(filtered)} findings shown. Observations about covers, chapters, and uncertain differences remain read-only.")
-    records = [{"ID": f["id"], "Book": books[f["item_id"]].values["title"], "Field": f["field"],
-                "Current": display(f["current"]), "Proposed": display(f["target"]), "Kind": f["kind"],
-                "Confidence": f["confidence"], "Status": f["status"], "Reason": f["reason"]} for f in filtered]
-    if records:
-        st.dataframe(records, hide_index=True, width="stretch")
-        by_id = {f["id"]: f for f in filtered}
-        choices = [f["id"] for f in filtered if f["actionable"] and f["status"] not in ("applied", "expired")]
-        selected = st.multiselect("Explicitly select proposals for a bulk decision", choices,
-                                 format_func=lambda fid: f"#{fid} · {books[by_id[fid]['item_id']].values['title']} · {by_id[fid]['field']}")
-        c1, c2 = st.columns(2)
-        if c1.button("Approve selected fields", disabled=not selected or not can_review):
-            store.review(selected, "approved")
-            flash(f"Approved {len(selected)} explicitly selected fields. Open Update Sources to preview.")
-        if c2.button("Reject selected fields", disabled=not selected or not can_review):
-            store.review(selected, "rejected")
-            flash(f"Rejected {len(selected)} selected fields.")
-        fid = st.selectbox("Inspect one finding", list(by_id),
-                           format_func=lambda fid: f"#{fid} · {books[by_id[fid]['item_id']].values['title']} · {by_id[fid]['field']}")
-        f = by_id[fid]
-        st.subheader(f"{f['field'].capitalize()} · {f['kind']}")
-        a, b = st.columns(2)
-        a.write("**Current observed value**")
-        a.code(display(f["current"]), language="json" if not isinstance(f["current"], str) else None, wrap_lines=True)
-        b.write("**Proposed value**")
-        b.code(display(f["target"]), language="json" if not isinstance(f["target"], str) else None, wrap_lines=True)
-        st.write(f["reason"])
-        with st.expander("Evidence", expanded=False):
-            st.json(f["evidence"])
-        if f["actionable"]:
-            disabled = not can_review or f["status"] in ("applied", "expired")
-            st.caption(f"Saved decision: {f['status']}. Choose approval explicitly for any edited value.")
-            with st.form(f"review_{fid}_{f['reviewed']}"):
-                text = st.text_area("Edit proposed value", value=display(f["target"]),
-                                    help="Text for title/subtitle. JSON arrays for authors, narrators, or series.")
-                decision = st.selectbox("Decision", ["pending", "approved", "rejected"], index=0)
-                if st.form_submit_button("Save field decision", disabled=disabled):
-                    store.review([fid], decision, parse_editor(f["field"], text))
-                    flash("Field decision saved. Editing the target requires the decision chosen here.")
-    else:
-        st.info("No findings match these filters.")
-    with st.expander("Create a manual field proposal"):
-        st.caption("Use this for missing credits, subtitles, or corrections that need your own edition evidence. New proposals start pending.")
-        if books:
-            with st.form("manual_proposal"):
-                item_id = st.selectbox("Book", list(books), format_func=lambda key: books[key].values["title"] or key)
-                field = st.selectbox("Metadata field", FIELDS)
-                target_text = st.text_area("New value", help='Example contributors: ["Author One", "Author Two"]. Series: [{"name":"Series","sequence":"2.5"}]')
-                reason = st.text_input("Evidence / reason")
-                if st.form_submit_button("Create pending proposal", disabled=not can_review):
-                    store.propose(aid, item_id, field, parse_editor(field, target_text), reason)
-                    flash("Created a pending proposal. Review and approve it explicitly before applying.")
-    if findings:
-        st.download_button("Export findings & decisions (JSON)", json.dumps(findings, ensure_ascii=False, indent=2),
-                           f"audit-{aid}-findings.json", "application/json")
-        buffer = io.StringIO(newline="")
-        writer = csv.DictWriter(buffer, fieldnames=["id", "item_id", "field", "current", "target", "confidence", "status", "reason"])
-        writer.writeheader()
-        for f in findings:
-            values = {k: display(f[k]) for k in writer.fieldnames}
-            # Prevent exported spreadsheet cells from evaluating formula-like book/user text.
-            writer.writerow({k: "'" + v if v.startswith(("=", "+", "-", "@", "\t", "\r")) else v for k, v in values.items()})
-        st.download_button("Export findings & decisions (CSV)", buffer.getvalue(), f"audit-{aid}-findings.csv", "text/csv")
-
-
 def show_plan(plan):
     st.write(f"**Server:** {plan['server']} · **Library ID:** {plan['library']}")
     for group in plan.get("books", [plan]):
@@ -377,142 +255,147 @@ def show_plan(plan):
             st.json(group["payload"])
 
 
-def apply_view(store, audit=None):
-    st.write("Preview approved changes, then confirm this exact batch. Live values are revalidated before each write.")
-    audit = audit or choose_snapshot(store)
-    if audit is None:
-        st.info("Run an audit and approve fields in Resolve first.")
-        return
-    if audit["read_only"] or audit["status"] != "complete":
-        return
-    plan = preview(store, audit["id"])
-    if not plan["books"]:
-        st.info("No approved fields are pending. Open Resolve to approve specific corrections.")
-        return
-    count = sum(len(b["changes"]) for b in plan["books"])
-    st.subheader(f"Dry run · {count} fields across {len(plan['books'])} books")
-    show_plan(plan)
-    st.caption("This preview performs no remote writes. One metadata update per book; stop at the first uncertain result.")
-    adapter = st.session_state.get("adapter")
-    selected_library = st.session_state.get("library", {})
-    connected = (adapter is not None and adapter.server == plan["server"]
-                 and selected_library.get("id") == plan["library"])
-    blocked = store.unresolved(plan["server"])
-    if blocked:
-        st.warning("Unresolved journal entries block writes. Reconcile them first.")
-    if not connected:
-        st.info("Connect to this snapshot’s source server and select its library in Settings before applying.")
-    expected = confirmation(plan)
-    st.write("To confirm the exact values above, enter:")
-    st.code(expected, language=None)
-    with st.form(f"apply_{plan['digest']}"):
-        phrase = st.text_input("Apply confirmation", key=f"phrase_{plan['digest']}")
-        acknowledged = st.checkbox("I approve the exact fields shown and want to write this batch to Audiobookshelf.")
-        submit = st.form_submit_button("Apply confirmed changes", type="primary", disabled=not connected or bool(blocked))
-    if submit:
-        if not acknowledged:
-            st.error("Select the explicit write confirmation checkbox.")
-            return
-        ids = Workflow(store, adapter).apply(plan, phrase, progress_bar())
-        flash(f"Verified {len(ids)} book updates. Results and guarded rollback are available in Reconcile & History.")
-
-
 def history_view(store):
-    st.title("Reconcile & History")
+    st.title("History")
     st.write("Inspect durable intent and observed results. Reconciliation only reads the server; rollback requires confirmation.")
-    persistent_history(store)
-    rows = store.history()
-    if not rows:
-        st.info("No updates have been submitted. Verified, skipped, failed, and uncertain operations appear here.")
-        return
-    state_filter = st.multiselect("Operation states", sorted({r["state"] for r in rows}))
-    visible = [r for r in rows if not state_filter or r["state"] in state_filter]
-    st.dataframe([{k: r[k] for k in ("id", "created", "server", "library", "item_id", "action", "state", "message")}
-                  for r in visible], hide_index=True, width="stretch")
-    if not visible:
-        return
-    oid = st.selectbox("Inspect operation", [r["id"] for r in visible],
-                       format_func=lambda oid: next(f"#{oid} · {r['action']} · {r['state']} · {r['item_id']}"
-                                                   for r in visible if r["id"] == oid))
-    row = store.operation(oid)
-    data = row["data"]
-    st.write(f"**{row['state']}** · {row['message']}")
-    st.json({"identity": data.get("identity"), "before": data.get("before"),
-             "intended_after": data.get("after"), "payload": data.get("payload")})
-    with st.expander("Persisted pre-update and observed result"):
-        st.json({"pre_update": data.get("pre_update_raw"), "observed": row["observed"]})
-    adapter = st.session_state.get("adapter")
-    connected = adapter is not None and adapter.server == row["server"]
-    if row["state"] in ("prepared", "applied", "uncertain"):
-        st.warning("Do not retry this write. Compare live state with the persisted before/after values.")
-        if st.button("Reconcile using live metadata (read-only)", disabled=not connected):
-            result = Workflow(store, adapter).reconcile(oid)
-            flash(f"Reconciliation result: {result}. No metadata write was sent.")
-        st.caption("Mixed state remains blocked. Inspect the item in Audiobookshelf, restore a recorded state deliberately there, then reconcile again.")
-    if row["state"] == "verified" and row["action"] == "apply":
-        if not connected:
-            st.info("Connect to the original server to preview and confirm a selective rollback.")
+    with st.expander("Advanced / Troubleshooting", expanded=bool(store.unresolved(st.session_state.get("server", "")))):
+        historical = choose_snapshot(store)
+        if historical:
+            st.dataframe(store.findings(historical["id"]), hide_index=True, width="stretch")
+            archived = store.books(historical["id"])
+            if archived:
+                iid = st.selectbox("Historical book", [b.id for b in archived],
+                                   format_func=lambda key: next(b.values["title"] or key for b in archived if b.id == key))
+                st.json(store.book(historical["id"], iid).raw)
+    audit = active_inventory(store)
+    if audit:
+        events = [{"When": a["started"], "Activity": "Import: " + a["status"], "Book": "Library", "Why": a["error"] or "Inventory refresh"}
+                  for a in store.audits() if a["server"] == audit["server"] and a["library"] == audit["library"]]
+        for table, event in (("field_decision_history", "Field decision"), ("candidate_decision_history", "Edition decision"), ("corrections", "Correction")):
+            for row in store.rows(f"SELECT * FROM {table} WHERE server=? AND library=?", (audit["server"], audit["library"])):
+                events.append({"When": row["created"], "Activity": event + ": " + row.get("decision", row.get("status", "")),
+                               "Book": row["item_id"], "Why": row["evidence"]})
+        for operation in store.history(audit["server"]):
+            if operation["library"] == audit["library"]:
+                events.append({"When": operation["updated"], "Activity": operation["action"] + ": " + operation["state"],
+                               "Book": operation["item_id"], "Why": operation["message"]})
+        for lookup in store.rows("SELECT l.captured,l.source,l.data,t.item_id FROM verification_lookups l JOIN verification_tasks t ON t.lookup_id=l.id JOIN verification_runs r ON r.id=t.run_id JOIN audits a ON a.id=r.audit_id WHERE a.server=? AND a.library=?",
+                                 (audit["server"], audit["library"])):
+            events.append({"When": lookup["captured"], "Activity": "Search: " + lookup["source"], "Book": lookup["item_id"],
+                           "Why": json.loads(lookup["data"])["state"]})
+        for catalog in store.rows("SELECT h.imported FROM calibre_catalog_history h JOIN audits a ON a.id=h.audit_id WHERE a.server=? AND a.library=?",
+                                  (audit["server"], audit["library"])):
+            events.append({"When": catalog["imported"], "Activity": "Calibre catalog compared", "Book": "Library", "Why": "Read-only validation"})
+        st.dataframe(sorted(events, key=lambda e: e["When"], reverse=True), hide_index=True, width="stretch")
+    with st.expander("Write journals and guarded recovery", expanded=any(r["state"] in ("prepared", "applied", "uncertain") for r in store.history())):
+        rows = store.history()
+        if not rows:
+            st.info("No updates have been submitted. Verified, skipped, failed, and uncertain operations appear here.")
             return
-        wf = Workflow(store, adapter)
-        back = wf.rollback_preview(oid)
-        with st.expander("Guarded rollback of this operation"):
-            st.write("Rollback restores only these fields and requires the live values to still match the verified applied state.")
-            show_plan(back)
-            expected = confirmation(back, "ROLLBACK")
-            st.code(expected, language=None)
-            with st.form(f"rollback_{back['digest']}"):
-                phrase = st.text_input("Rollback confirmation")
-                checked = st.checkbox("Restore the exact previous values shown above.")
-                submit = st.form_submit_button("Restore confirmed fields", disabled=bool(store.unresolved(row["server"])))
-            if submit:
-                if not checked:
-                    st.error("Select the explicit rollback confirmation checkbox.")
-                    return
-                wf.rollback(back, phrase)
-                flash("Rollback verified. Start a fresh audit before proposing further corrections.")
+        state_filter = st.multiselect("Operation states", sorted({r["state"] for r in rows}))
+        visible = [r for r in rows if not state_filter or r["state"] in state_filter]
+        st.dataframe([{k: r[k] for k in ("id", "created", "server", "library", "item_id", "action", "state", "message")}
+                      for r in visible], hide_index=True, width="stretch")
+        if not visible:
+            return
+        oid = st.selectbox("Inspect operation", [r["id"] for r in visible],
+                           format_func=lambda oid: next(f"#{oid} · {r['action']} · {r['state']} · {r['item_id']}"
+                                                       for r in visible if r["id"] == oid))
+        row = store.operation(oid)
+        data = row["data"]
+        st.write(f"**{row['state']}** · {row['message']}")
+        st.dataframe(operation_comparison(data, row["observed"]), hide_index=True, width="stretch")
+        with st.expander("Advanced / Raw operation JSON"):
+            st.json({"intent": data, "observed": row["observed"]})
+        adapter = st.session_state.get("adapter")
+        connected = adapter is not None and adapter.server == row["server"]
+        if row["state"] in ("prepared", "applied", "uncertain"):
+            st.warning("Do not retry this write. Compare live state with the persisted before/after values.")
+            if st.button("Reconcile using live metadata (read-only)", disabled=not connected):
+                result = Workflow(store, adapter).reconcile(oid)
+                flash(f"Reconciliation result: {result}. No metadata write was sent.")
+            st.caption("Mixed state remains blocked. Inspect the item in Audiobookshelf, restore a recorded state deliberately there, then reconcile again.")
+        if row["state"] == "verified" and row["action"] == "apply":
+            if not connected:
+                st.info("Connect to the original server to preview and confirm a selective rollback.")
+                return
+            wf = Workflow(store, adapter)
+            back = wf.rollback_preview(oid)
+            with st.expander("Guarded rollback of this operation"):
+                st.write("Rollback restores only these fields and requires the live values to still match the verified applied state.")
+                show_plan(back)
+                expected = confirmation(back, "ROLLBACK")
+                st.code(expected, language=None)
+                with st.form(f"rollback_{back['digest']}"):
+                    phrase = st.text_input("Rollback confirmation")
+                    checked = st.checkbox("Restore the exact previous values shown above.")
+                    submit = st.form_submit_button("Restore confirmed fields", disabled=bool(store.unresolved(row["server"])))
+                if submit:
+                    if not checked:
+                        st.error("Select the explicit rollback confirmation checkbox.")
+                        return
+                    wf.rollback(back, phrase)
+                    flash("Rollback verified. Start a fresh audit before proposing further corrections.")
 
 
-def resolve_view(store):
-    st.title("Resolve")
-    st.write("Review saved fields, preserve acceptance, and prepare only the corrections you need.")
-    audit = choose_snapshot(store)
-    if audit is None:
-        st.info("Import a library first. Match editions for external evidence, or record your own field evidence here.")
-        return
-    metadata, proposals = st.tabs(["Review saved metadata", "Approve audiobook corrections"])
-    with metadata:
-        resolution_view(store, audit)
-    with proposals:
-        review_view(store, audit)
-
-
-def update_sources_view(store):
-    st.title("Update Sources")
-    audit = choose_snapshot(store)
-    if audit is None:
-        st.info("Import a library and prepare corrections in Resolve first.")
-        return
-    audio, manual = st.tabs(["Audiobookshelf approved batch", "Calibre & manual corrections"])
-    with audio:
-        apply_view(store, audit)
-    with manual:
-        correction_queue(store, audit)
+def active_inventory(store):
+    library = st.session_state.get("library", {})
+    server = st.session_state.get("server", getattr(st.session_state.get("adapter"), "server", ""))
+    return next((a for a in store.audits() if a["server"] == server and a["library"] == library.get("id")
+                 and a["status"] == "complete"), None)
 
 
 def main():
     store = Store(os.getenv("ABS_MM_DB", str(ROOT / "data" / "metadata.sqlite3")))
+    if "reconnect_checked" not in st.session_state:
+        st.session_state["reconnect_checked"] = True
+        saved = preferences.load()
+        if saved.get("server", "").startswith(("http://", "https://")):
+            try:
+                token = preferences.credential(saved["server"])
+                if token:
+                    st.session_state["adapter"] = CliAdapter(Settings(saved["server"], token, saved.get("executable", "abs-cli")))
+                else:
+                    st.session_state["credential_error"] = preferences.CREDENTIAL_RECOVERY
+            except preferences.CredentialError:
+                st.session_state["credential_error"] = preferences.CREDENTIAL_RECOVERY
     with st.sidebar:
         st.header("Metadata Manager")
-        page = st.radio("Workspace", ["Import", "Match & Verify", "Resolve", "Update Sources", "Reconcile & History", "Settings"])
+        saved = preferences.load()
+        adapter = st.session_state.get("adapter")
+        server = getattr(adapter, "server", saved.get("server", ""))
+        st.session_state["server"] = server
+        libraries = st.session_state.get("connection_result", {}).get("libraries", [])
+        if not libraries:
+            libraries = [{"id": a["library"], "name": a["name"], "mediaType": "book"}
+                         for a in store.audits() if a["server"] == server]
+        libraries = {lib["id"]: lib for lib in libraries if lib.get("mediaType") == "book"}
+        if libraries:
+            ids = list(libraries)
+            library_key = "global_library:" + server
+            if st.session_state.get(library_key) not in ids:
+                preferred = saved.get("library", st.session_state.get("library", {}).get("id"))
+                st.session_state[library_key] = preferred if preferred in ids else ids[0]
+            chosen = st.selectbox("Library", ids, format_func=lambda key: libraries[key]["name"], key=library_key)
+            st.session_state["library"] = libraries[chosen]
+            if saved.get("library") != chosen:
+                preferences.save({**saved, "library": chosen})
+        else:
+            st.session_state.pop("library", None)
+        page = st.radio("Workspace", ["Import", "Match & Verify", "Changes", "History", "Settings"])
         adapter = st.session_state.get("adapter")
         st.caption(f"Connected · {adapter.server}" if adapter else "Local workspace · disconnected")
         st.divider()
-        st.caption("Import → Match → Resolve → Update Sources → Reimport")
+        st.caption("Import → Match & Verify → Changes → History")
+    if any(r["state"] in ("prepared", "applied", "uncertain") for r in store.history()):
+        st.warning("Recovery required. Open History to reconcile before further writes.")
     if message := st.session_state.pop("flash", None):
         st.success(message)
-    views = {"Import": library_view, "Match & Verify": lambda s: verification_view(s, choose_snapshot),
-             "Resolve": resolve_view, "Update Sources": update_sources_view,
-             "Reconcile & History": history_view, "Settings": settings_view}
+    if error := st.session_state.get("credential_error"):
+        st.warning(error)
+    views = {"Import": library_view, "Match & Verify": lambda s: verification_view(s, active_inventory),
+             "Changes": lambda s: changes_view(s, active_inventory(s), show_plan, progress_bar),
+             "History": history_view, "Settings": settings_view}
     try:
         views[page](store)
     except (AdapterError, SafetyError, BusyError, ValueError, KeyError) as exc:

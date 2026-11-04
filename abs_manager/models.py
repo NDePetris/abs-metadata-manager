@@ -11,6 +11,22 @@ from typing import Any
 FIELDS = ("title", "subtitle", "authors", "narrators", "series")
 
 
+def target_observed(field, desired, observed):
+    """Directional equivalence for an explicit subtitle clear only."""
+    return desired == observed or (field == "subtitle" and desired == "" and observed is None)
+
+
+def result_matches(expected, observed, changes):
+    return expected.keys() == observed.keys() and all(
+        target_observed(field, value, observed[field]) if field in changes and changes[field] == value
+        else value == observed[field] for field, value in expected.items())
+
+
+def review_fields(is_audio: bool) -> tuple[str, ...]:
+    """The same editable/confirmable fields in the UI and local decision store."""
+    return FIELDS if is_audio else ("title", "subtitle", "authors", "series", "identifiers")
+
+
 def compact(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 

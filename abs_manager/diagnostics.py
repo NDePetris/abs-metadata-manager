@@ -8,6 +8,26 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
+def data_type(value):
+    return ("null" if value is None else "boolean" if isinstance(value, bool) else
+            "string" if isinstance(value, str) else "object" if isinstance(value, dict) else
+            "array" if isinstance(value, list) else "number" if isinstance(value, (int, float)) else "unsupported")
+
+
+class CandidateError(ValueError):
+    """Structural context only. Call sites supply fixed field names, never provider keys/values."""
+
+    def __init__(self, field=None, expected="supported value", actual="unsupported", *, stage="normalization"):
+        super().__init__("Candidate processing failed; values withheld.")
+        self.structure = {"stage": stage, "field": field, "expected_type": expected, "actual_type": actual}
+
+    def safe_diagnostic(self, provider, index):
+        return {"provider": provider, "candidate_index": index,
+                "category": {"shape": "unsupported_candidate_shape", "normalization": "candidate_normalization",
+                             "identity": "candidate_identity", "persistence": "candidate_persistence"}[self.structure["stage"]],
+                **self.structure}
+
+
 def local_log(path: Path) -> logging.Logger:
     path = path.resolve()
     logger = logging.getLogger(f"abs.audit.{path}")
@@ -46,3 +66,76 @@ def stderr_summary(stderr: str | bytes | None, secret: str) -> str:
 
 def event(logger: logging.Logger, **values):
     logger.info(json.dumps(values, ensure_ascii=True, sort_keys=True))
+
+
+def response_shape(body: str | bytes) -> dict:
+    """Describe a response without retaining even a prefix, key, URL or value."""
+    result = {"length": len(body), "length_unit": "bytes" if isinstance(body, bytes) else "characters"}
+    if isinstance(body, bytes):
+        if body.startswith(b"\x1f\x8b"):
+            return {**result, "kind": "gzip_bytes"}
+        try:
+            body = body.decode("utf-8")
+        except UnicodeDecodeError:
+            return {**result, "kind": "invalid_utf8"}
+    text = body.lstrip()
+    kind = ("empty" if not text else "utf8_bom" if text.startswith("\ufeff") else
+            "html_like" if re.match(r"(?is)<!doctype\s+html\b|<html\b", text) else
+            "markup_like" if text.startswith("<") else
+            "json_like_invalid" if text.startswith(("[", "{")) else "other_non_json")
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError as exc:
+        # Never retain exc.doc, exc.msg, offending characters or surrounding text.
+        return {**result, "kind": kind, "error_position": exc.pos,
+                "error_line": exc.lineno, "error_column": exc.colno}
+    json_type = ("array" if isinstance(value, list) else "object" if isinstance(value, dict) else "scalar")
+    return {**result, "kind": "valid_json", "json_type": json_type,
+            **({"count": len(value)} if isinstance(value, (list, dict)) else {})}
+
+
+def provider_failure(exc, provider, operation):
+    """Only categorized adapter data and recognized vocabulary leave this boundary."""
+    if isinstance(exc, CandidateError):
+        return {**exc.safe_diagnostic(provider, None), "operation": operation,
+                "summary": "candidate could not be processed; values withheld"}
+    record = getattr(exc, "diagnostic", None) or {}
+    category = record.get("category", "invalid_schema")
+    allowed = {"authorization", "transient_http", "permanent_http", "timeout", "connection_reset",
+               "cli_error", "executable_error", "malformed_response", "invalid_schema", "configuration"}
+    if category not in allowed:
+        category = "cli_error"
+    detail = stderr_summary(record.get("stderr", ""), "")
+    status = re.search(r"\b[1-5]\d\d\b", detail)
+    reached = "HTTP response received; origin may be ABS or upstream" if status else (
+        "CLI stdout received; ABS HTTP status/content type unknown" if category == "malformed_response" else
+        "Response received" if category == "invalid_schema" else "Not established")
+    summary = {"authorization": "authorization error; check ABS and provider credentials/configuration",
+               "transient_http": "rate limited or upstream unavailable",
+               "permanent_http": "HTTP request failed",
+               "timeout": "timeout; ABS/upstream completion unknown",
+               "connection_reset": "connection failed", "cli_error": "CLI command failed",
+               "executable_error": "CLI could not start",
+               "malformed_response": "CLI stdout is not valid JSON; exit 0 does not establish a JSON API response",
+               "invalid_schema": "provider returned an unsupported response",
+               "configuration": "requires authentication/configuration; independent Google Books API key missing"}[category]
+    diagnostic = {"provider": provider, "operation": operation, "category": category,
+            "summary": summary, "detail": detail, "http_status": status.group(0) if status else None,
+            "exit_code": record.get("exit_code"), "reached_abs": reached}
+    if record.get("transport") == "direct_get":
+        diagnostic["transport"] = "direct_get"
+        if category in ("malformed_response", "invalid_schema"):
+            diagnostic["stage"] = "http_json" if category == "malformed_response" else "response_schema"
+        if category == "malformed_response":
+            diagnostic["summary"] = "metadata search returned a non-JSON HTTP body"
+    shape = record.get("response_shape", {})
+    safe_shape = {k: v for k, v in shape.items() if (
+        k in {"length", "error_position", "error_line", "error_column", "count"}
+        and type(v) is int and v >= 0) or (
+        k == "kind" and v in {"gzip_bytes", "invalid_utf8", "empty", "utf8_bom", "html_like",
+                              "markup_like", "json_like_invalid", "other_non_json", "valid_json"}) or (
+        k == "json_type" and v in {"array", "object", "scalar"}) or (
+        k == "length_unit" and v in {"bytes", "characters"})}
+    if safe_shape:
+        diagnostic["response_shape"] = safe_shape
+    return diagnostic
