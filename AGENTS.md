@@ -44,7 +44,8 @@ unknown or review-later decision is not an automatic pass. Assessment never
 stages, approves or applies a correction. Human acceptance, staged targets,
 preview-bound write approval and changes actually observed in ABS are separate.
 S2 derives these dispositions in verification reports, separately from the existing
-review-acceptance state. The exception-first queue remains deferred to S3.
+review-acceptance state. S3 presents them in the exception-first queue, with bounded
+explicit cover review and library-scoped category preferences. S4 remains deferred.
 
 Keep one operation at a time under the cross-process workspace lock. A crash
 releases the OS lock, but journal intent remains. Prepared/applied/uncertain

@@ -34,6 +34,10 @@ class PersistentState:
     def _init_persistent_state(self):
         with self.connect() as db:
             db.executescript("""
+            CREATE TABLE IF NOT EXISTS category_preferences (
+              server TEXT NOT NULL, library TEXT NOT NULL, field TEXT NOT NULL,
+              value TEXT NOT NULL, decision TEXT NOT NULL, created TEXT NOT NULL,
+              PRIMARY KEY(server,library,field,value));
             BEGIN IMMEDIATE;
             CREATE TABLE IF NOT EXISTS field_decision_history (
               id INTEGER PRIMARY KEY, server TEXT NOT NULL, library TEXT NOT NULL, item_id TEXT NOT NULL,
@@ -148,6 +152,80 @@ class PersistentState:
         book = self.book(audit_id, item_id)
         return audit, book, identity(book)
 
+    def category_preferences(self, audit_id):
+        audit = self.audit(audit_id)
+        return self.rows("SELECT * FROM category_preferences WHERE server=? AND library=?",
+                         (audit["server"], audit["library"]))
+
+    def decide_category(self, audit_id, field, value, decision):
+        if field not in ("genres", "tags") or not isinstance(value, str) or not value.strip() or decision not in (
+                "Acceptable", "Unwanted", "Unreviewed"):
+            raise ValueError("Choose an exact genre/tag value and a library preference.")
+        with operation_lock(self.path):
+            audit = self.audit(audit_id)
+            if audit["status"] != "complete" or self.latest(audit["server"], audit["library"])["id"] != audit_id:
+                raise ValueError("The latest complete audit is required.")
+            with self.connect() as db:
+                db.execute("INSERT OR REPLACE INTO category_preferences VALUES(?,?,?,?,?,?)",
+                           (audit["server"], audit["library"], field, value, decision, timestamp()))
+
+    def observe_cover(self, audit_id, item_id, adapter):
+        """Explicit bounded read. Store only identity/hash/state, never image bytes."""
+        import hashlib
+        import io
+
+        from PIL import Image
+
+        from .adapter import AdapterError
+        from .library_review import cover_identity
+        from .models import Book
+        with operation_lock(self.path):
+            audit, book, _ = self._scope(audit_id, item_id)
+            if (adapter.server != audit["server"] or audit["status"] != "complete"
+                    or self.latest(audit["server"], audit["library"])["id"] != audit_id):
+                raise ValueError("Use the connected server and latest complete snapshot.")
+            observation = {"date": timestamp(), "cover_identity": cover_identity(book), "state": "unavailable"}
+            data = None
+            try:
+                live = Book(adapter.item(item_id))
+                if cover_identity(live) != cover_identity(book):
+                    raise AdapterError("Cover identity changed; refresh the library before reviewing.")
+                if not values(book)["cover"]:
+                    raise AdapterError("No saved cover; correct it in native ABS or Calibre.")
+                data = adapter.cover(item_id)
+                if not data or len(data) > 10_000_000:
+                    raise AdapterError("Cover unavailable or exceeds the 10 MB preview limit.")
+                with Image.open(io.BytesIO(data)) as image:
+                    if image.width * image.height > 25_000_000:
+                        raise AdapterError("Cover dimensions exceed the preview limit.")
+                    image.load()
+                observation.update(state="retrieved", content_digest=hashlib.sha256(data).hexdigest())
+            except (AdapterError, OSError, ValueError, Image.DecompressionBombError):
+                data = None
+            with self.connect() as db:
+                db.execute("INSERT OR REPLACE INTO verification_annotations VALUES(?,?,?,?)",
+                           (audit_id, item_id, "cover", compact(observation)))
+            return data, observation
+
+    def confirm_cover(self, audit_id, item_id, content_digest):
+        """Bind visual acceptance to the exact successfully retrieved bytes."""
+        from .library_review import cover_identity
+        with operation_lock(self.path):
+            audit, book, ident = self._scope(audit_id, item_id)
+            observation = self.verification_annotations(audit_id, item_id).get("cover", {})
+            if (not content_digest or observation.get("state") != "retrieved"
+                    or observation.get("content_digest") != content_digest
+                    or observation.get("cover_identity") != cover_identity(book)
+                    or self.latest(audit["server"], audit["library"])["id"] != audit_id):
+                raise ValueError("Retrieve and inspect this saved cover first.")
+            value = values(book)["cover"]
+            with self.connect() as db:
+                db.execute("INSERT INTO field_decision_history(server,library,item_id,identity_digest,field,value,"
+                           "value_digest,decision,evidence,source,created,audit_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                           (audit["server"], audit["library"], item_id, ident, "cover", compact(value), digest(value),
+                            "confirmed", "Visually inspected: appropriate artwork for this work",
+                            "cover:" + content_digest, timestamp(), audit_id))
+
     def decide_fields(self, audit_id, item_id, fields, decision, evidence="", source=""):
         if (
             decision not in ("confirmed", "correction_needed", "unable", "later", "reopened")
@@ -191,9 +269,9 @@ class PersistentState:
                         ),
                     )
 
-    def field_decisions(self, audit_id, item_id, history=False):
-        audit, book, ident = self._scope(audit_id, item_id)
-        rows = self.rows(
+    def field_decisions(self, audit_id, item_id, history=False, *, _scope=None, _rows=None, _corrections=None):
+        audit, book, ident = _scope if _scope is not None else self._scope(audit_id, item_id)
+        rows = _rows if _rows is not None else self.rows(
             "SELECT * FROM field_decision_history WHERE server=? AND library=? AND item_id=? AND audit_id<=? ORDER BY id DESC",
             (audit["server"], audit["library"], item_id, audit_id),
         )
@@ -205,7 +283,8 @@ class PersistentState:
                                   c["item_id"] == item_id and c["field"] == "subtitle"
                                   and c["accepted"] and c["proposed"] == ""
                                   and c["identity_digest"] == identity(book, "subtitle")
-                                  and c["status"] == "observed_in_abs" for c in self.corrections(audit_id)))
+                                  and c["status"] == "observed_in_abs" for c in (
+                                      _corrections if _corrections is not None else self.corrections(audit_id))))
             row["valid"] = (row["identity_digest"] == ident or self.expected_transition(
                 audit_id, item_id, self.book(row["audit_id"], item_id))) and (
                     row["value_digest"] == digest(vals[row["field"]]) or accepted_clear)
@@ -242,9 +321,9 @@ class PersistentState:
                     ),
                 )
 
-    def candidate_decisions(self, audit_id, item_id, history=False):
-        audit, _, ident = self._scope(audit_id, item_id)
-        rows = self.rows(
+    def candidate_decisions(self, audit_id, item_id, history=False, *, _scope=None, _rows=None):
+        audit, _, ident = _scope if _scope is not None else self._scope(audit_id, item_id)
+        rows = _rows if _rows is not None else self.rows(
             "SELECT * FROM candidate_decision_history WHERE server=? AND library=? AND item_id=? AND audit_id<=? ORDER BY id DESC",
             (audit["server"], audit["library"], item_id, audit_id),
         )

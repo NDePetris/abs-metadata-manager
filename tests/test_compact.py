@@ -51,6 +51,8 @@ def test_reference_copy_switch_navigation_preserves_drafts(tmp_path, monkeypatch
     add_reference(store, aid, source)
     at = app(store, api, monkeypatch)
     page(at, "Match & Verify")
+    widget(at, "selectbox", "Quality").set_value("All books").run()
+    widget(at, "selectbox", "Book").set_value("current-id").run()
     assert not any(c.value for c in at.checkbox if c.label in [f.capitalize() for f in review_fields(True)])
     widget(at, "text_input", "Desired subtitle").set_value("Unsaved subtitle").run()
     copy_button(at, "title").click().run()
@@ -76,6 +78,7 @@ def test_confirmation_is_selected_atomic_and_next_only_on_success(tmp_path, monk
     store, api, aid = two_books(tmp_path)
     at = app(store, api, monkeypatch)
     page(at, "Match & Verify")
+    widget(at, "selectbox", "Quality").set_value("All books").run()
     assert widget(at, "button", "Confirm").disabled
     widget(at, "text_input", "Desired title").set_value("").run()
     widget(at, "text_input", "Desired subtitle").set_value("Keep after failure").run()

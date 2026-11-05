@@ -6,8 +6,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
-os.environ["ABS_MM_DB"] = str(ROOT / ".test-tmp-compact" / "visual.sqlite")
-os.environ["ABS_MM_SETTINGS"] = str(ROOT / ".test-tmp-compact" / "settings")
+os.environ["ABS_MM_DB"] = str(ROOT / ".test-tmp-s3-visual" / "visual.sqlite")
+os.environ["ABS_MM_SETTINGS"] = str(ROOT / ".test-tmp-s3-visual" / "settings")
 
 import streamlit as st
 from conftest import FakeAdapter, make_book
@@ -52,6 +52,16 @@ def fixture_source(source_id, adapter):
 
 
 api = FakeAdapter(books)
+def synthetic_cover(iid):
+    import io
+
+    from PIL import Image
+    output = io.BytesIO()
+    Image.new("RGB", (160, 220), "steelblue" if iid == "ordinary" else "darkred").save(output, "PNG")
+    return output.getvalue()
+
+
+api.cover = synthetic_cover
 api.metadata_search = lambda provider, query: [{"id": "synthetic-" + provider, "title": query["title"],
     "author": ["Dennis E. Taylor"], "narrator": ["Ray Porter"], "duration": 1000 / 60}]
 store = Store(os.environ["ABS_MM_DB"])

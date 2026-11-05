@@ -191,7 +191,8 @@ def analyze(book: Book) -> tuple[dict, list[Finding]]:
         note("title", "suspicious", "Folder title differs; it may represent another edition or a legitimate subtitle.")
     embedded_title = embedded.get("title")
     if isinstance(embedded_title, str) and canon(embedded_title) not in (canon(title), canon(clean)):
-        note("title", "conflict", "Embedded title differs. Embedded tags may be stale; inspect before editing.")
+        note("embedded", "informational", "Embedded audio title differs from the saved ABS title. "
+             "Source-file cleanup is deferred; this does not establish an incorrect ABS title.")
 
     media = book.raw["media"]
     if not media.get("coverPath"):

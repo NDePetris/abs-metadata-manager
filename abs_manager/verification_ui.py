@@ -1,6 +1,7 @@
 """Compact native review. Draft state is separate from disposable widget state."""
 import copy
 import os
+from collections import Counter
 
 import streamlit as st
 
@@ -20,6 +21,118 @@ from .verification_workflow import (
     start_verification,
     unassessed_batch,
 )
+
+ESSENTIAL = ("title", "authors", "narrators", "series", "series_position")
+
+
+def quality_queue(report, disposition="Exceptions", search="", field=None, reason=None):
+    """One row per book, essential defects first; no persistence or transport."""
+    def include(r):
+        exceptions = {f: d for f, d in r["fields"].items() if d["disposition"] != "Pass"}
+        return ((disposition == "All books" or disposition == "Exceptions" and exceptions
+                 or r["disposition"] == disposition)
+                and (not field or field in exceptions)
+                and (not reason or any(d["reason_code"] == reason for d in exceptions.values()))
+                and search.casefold() in (display(r["fields"]["title"]["value"]) + " " +
+                                         display(r["fields"]["authors"]["value"])).casefold())
+
+    def priority(r):
+        return (0 if disposition == "All books" else ("Needs attention", "Needs evidence", "Pass").index(r["disposition"]),
+                0 if disposition == "All books" else -sum(r["fields"][f]["disposition"] == "Needs attention" for f in ESSENTIAL),
+                str(r["fields"]["title"]["value"]).casefold(), r["item_id"])
+
+    return sorted((r for r in report if include(r)), key=priority)
+
+
+def quality_explanation(details):
+    basis = {"independently_verified": "Independently verified; manual confirmation unnecessary",
+             "calibre_authority": "Calibre authority; manual confirmation unnecessary",
+             "human_confirmed": "Human confirmed", "correction_outstanding": "Correction staged but not observed"}
+    return basis.get(details["reason_code"], details["reason_code"].replace("_", " ").capitalize())
+
+
+def library_review_controls(store, audit, report):
+    from .library_review import category_inventory
+
+    aid = audit["id"]
+    key = "library-review:" + digest([store.path, audit["server"], audit["library"], aid])
+    labels = {r["item_id"]: display(r["fields"]["title"]["value"]) + " · " +
+              (r["identity"].get("relPath") or r["identity"]["path"]) for r in report}
+    label_counts = Counter(labels.values())
+    labels = {iid: label + (" · " + iid if label_counts[label] > 1 else "") for iid, label in labels.items()}
+    with st.expander("Cover gallery · explicit visual review"):
+        st.caption("Saved ABS artwork may depict any appropriate edition of the correct work. "
+                   "Ebook source artwork is maintained in Calibre; this reviews the ABS displayed image.")
+        st.caption("Correct artwork in native ABS (open the book → Edit → Cover), or Calibre for ebooks. "
+                   "Refresh Import and retrieve again after editing. Same-path image changes require a new retrieval.")
+        choices = sorted(report, key=lambda r: (r["fields"]["cover"]["disposition"] == "Pass",
+                                                bool(r["fields"]["cover"]["value"]), labels[r["item_id"]]))
+        selected = st.multiselect("Covers to retrieve (maximum 12)", [r["item_id"] for r in choices],
+                                  format_func=labels.get, max_selections=12, key=key + ":covers")
+        adapter = st.session_state.get("adapter")
+        connected = adapter is not None and adapter.server == audit["server"]
+        if st.button("Retrieve selected covers", disabled=not selected or not connected):
+            gallery = {}
+            try:
+                for iid in selected:
+                    data, observation = store.observe_cover(aid, iid, adapter)
+                    gallery[iid] = {"data": data, **observation}
+            except (ValueError, BusyError) as exc:
+                st.error(str(exc))
+            st.session_state[key + ":gallery"] = gallery
+            st.rerun()
+        gallery = st.session_state.get(key + ":gallery", {})
+        if gallery:
+            with st.form(key + ":inspection"):
+                inspected = []
+                columns = st.columns(3)
+                for index, (iid, observation) in enumerate(gallery.items()):
+                    with columns[index % 3]:
+                        st.write(labels[iid])
+                        if observation["data"]:
+                            st.image(observation["data"], width=180)
+                            if st.checkbox("I inspected this artwork; appropriate for this work",
+                                           key=key + ":inspect:" + iid + ":" + observation["content_digest"]):
+                                inspected.append(iid)
+                        else:
+                            st.warning("Saved cover missing, unavailable or changed. Refresh Import / correct in native app.")
+                if st.form_submit_button("Confirm inspected covers"):
+                    try:
+                        for iid in inspected:
+                            store.confirm_cover(aid, iid, gallery[iid]["content_digest"])
+                    except (ValueError, BusyError) as exc:
+                        st.error(str(exc))
+                    else:
+                        st.session_state["review_message"] = f"{len(inspected)} inspected covers confirmed locally."
+                        st.session_state.pop(key + ":gallery", None)
+                        st.rerun()
+    with st.expander("Genre and tag hygiene · library scope"):
+        inventory = category_inventory(report, store.category_preferences(aid))
+        st.caption(f"Scope: {audit['name']} · {len(report)} books. ABS genres and ABS tags are distinct; "
+                   "empty categories are allowed. Preferences are not independent bibliographic verification.")
+        if not inventory:
+            st.write("No saved genres or tags; no categorization cleanup required.")
+        else:
+            st.dataframe([{k: v for k, v in r.items() if k != "books"} for r in inventory], hide_index=True)
+            options = list(range(len(inventory)))
+            chosen = st.selectbox("Category", options,
+                                  format_func=lambda i: inventory[i]["field"] + " · " + inventory[i]["value"], key=key + ":category")
+            row = inventory[chosen]
+            st.write(f"{row['count']} impacted books · {row['decision']}")
+            st.dataframe([{"Book": labels[iid]} for iid in row["books"]], hide_index=True)
+            with st.form(key + ":category-decision:" + digest([row["field"], row["value"]])):
+                options = ["Acceptable", "Unwanted", "Unreviewed"]
+                decision = st.selectbox("Library preference", options, index=options.index(row["decision"]))
+                st.caption("Applies to this exact saved value across this server/library only. "
+                           "Correct unwanted values, duplicates or capitalization in native ABS; use Calibre for ebook source metadata. "
+                           "No rename, deletion or remote write is performed.")
+                if st.form_submit_button("Save category preference"):
+                    try:
+                        store.decide_category(aid, row["field"], row["value"], decision)
+                    except (ValueError, BusyError) as exc:
+                        st.error(str(exc))
+                    else:
+                        st.rerun()
 
 
 def acquisition_controls(store, audit, report, selected_id):
@@ -364,21 +477,29 @@ def verification_view(store, inventory):
         if not report:
             st.info("This library is empty.")
             return
-        report.sort(key=lambda r: (str(r["fields"]["title"]["value"]), r["item_id"]))
+        report = quality_queue(report, "All books")
         all_ids = [r["item_id"] for r in report]
         scope_key = "book:" + digest([audit["server"], audit["library"], aid])
         accepted = sum(r["review_status"] == "Accepted" for r in report)
+        counts = Counter(r["disposition"] for r in report)
+        st.write(" · ".join(f"{d}: {counts[d]}" for d in ("Pass", "Needs attention", "Needs evidence")))
+        st.caption(f"Historical manual acceptance: {accepted} / {len(report)} books · Current = imported ABS snapshot")
+        with st.expander("Queue filters"):
+            search = st.text_input("Search title or author", key=scope_key + ":search")
+            field_filter = st.selectbox("Affected field", ["Any"] + list(report[0]["fields"]), key=scope_key + ":field")
+            reasons = sorted({d["reason_code"] for r in report for d in r["fields"].values() if d["disposition"] != "Pass"})
+            reason_filter = st.selectbox("Reason", ["Any"] + reasons, key=scope_key + ":reason")
+        library_review_controls(store, audit, report)
         previous, selector, following, filter_col = st.columns([1.25, 5, 1, 2], vertical_alignment="bottom", gap="small")
-        review_filter = filter_col.selectbox("Review status", ["Needs review", "Accepted", "All books"],
+        review_filter = filter_col.selectbox("Quality", ["Exceptions", "Needs attention", "Needs evidence", "Pass", "All books"],
                                             key=scope_key + ":filter", label_visibility="collapsed")
-        queue = [r for r in report if review_filter == "All books" or
-                 (r["review_status"] == "Accepted") == (review_filter == "Accepted")]
+        queue = quality_queue(report, review_filter, search, None if field_filter == "Any" else field_filter,
+                              None if reason_filter == "Any" else reason_filter)
         ids = [r["item_id"] for r in queue]
         if message := st.session_state.pop("review_message", None):
             st.success(message)
-        st.caption(f"{accepted} / {len(report)} accepted · {len(report) - accepted} remaining · Current = imported ABS snapshot")
         if not ids:
-            st.info("All books accepted. Review complete." if review_filter == "Needs review" else "No accepted books yet.")
+            st.info("No quality exceptions remain." if counts["Pass"] == len(report) else "No books match these filters.")
 
             def show_all():
                 st.session_state[scope_key + ":filter"] = "All books"
@@ -396,11 +517,12 @@ def verification_view(store, inventory):
         previous.button("Previous", disabled=index == 0, on_click=navigate, args=(index - 1,))
         # Secondary labels distinguish duplicate titles without exposing internal IDs.
         labels = {}
+        title_counts = Counter(str(r["fields"]["title"]["value"]) for r in report)
         for r in report:
             label = str(r["fields"]["title"]["value"]) + " · " + display(r["fields"]["authors"]["value"])
-            if sum(x["fields"]["title"]["value"] == r["fields"]["title"]["value"] for x in report) > 1:
+            if title_counts[str(r["fields"]["title"]["value"])] > 1:
                 label += " · " + r["type"] + " · " + (r["identity"].get("relPath") or r["identity"]["path"])
-            labels[r["item_id"]] = label
+            labels[r["item_id"]] = r["disposition"] + " · " + label
         widget_key = scope_key + ":widget"
         st.session_state[widget_key] = st.session_state[scope_key]
 
@@ -411,6 +533,17 @@ def verification_view(store, inventory):
                                  label_visibility="collapsed")
         following.button("Next", disabled=index == len(ids) - 1, on_click=navigate, args=(index + 1,))
         item = next(r for r in report if r["item_id"] == iid)
+        essential = [item["fields"][f] for f in ESSENTIAL if item["fields"][f]["quality_applicable"]
+                     and (f != "series" or item["fields"][f]["value"])]
+        st.caption(f"Essential bibliographic fields: {sum(d['disposition'] == 'Pass' for d in essential)} / "
+                   f"{len(essential)} pass · Artwork: {item['fields']['cover']['disposition']} · "
+                   f"Book: {item['disposition']}")
+        with st.expander("Quality reasons and provenance"):
+            for field, details in item["fields"].items():
+                st.write(f"{field.capitalize()} · {details['disposition']} · {quality_explanation(details)}")
+                st.caption(details["reason"])
+                for provenance in details["provenance"]:
+                    st.caption(display(provenance))
         scope = draft_scope(audit, item)
         corrections = {r["field"]: r for r in reversed(store.corrections(aid))
                        if r["item_id"] == iid and r["accepted"] and r["status"] in ("pending", "edited_in_calibre", "verified_in_calibre")}
@@ -435,11 +568,12 @@ def verification_view(store, inventory):
                     state["selected"][field] = st.session_state[skey]
 
                 label.checkbox(field.capitalize(), key=skey, on_change=select)
-                decision = item["human_decisions"].get(field, {})
-                human = ("Accepted" if decision.get("decision") == "confirmed" else "Correction" if field in corrections else "Review") if decision.get("valid") else "Review"
                 with current, st.container(gap=None):
                     st.write(display(assessment["value"]))
-                    st.caption(assessment["status"] + " · " + human)
+                    st.caption(assessment["disposition"] + " · " + quality_explanation(assessment))
+                    sources = list(dict.fromkeys(p["source"] for p in assessment["provenance"]))
+                    if sources:
+                        st.caption("Source: " + ", ".join(sources))
                 with ref, st.container(gap=None):
                     st.write(display(reference[field]) if field in reference else "Not supplied")
                     if field == "narrators" and field in reference:
@@ -487,12 +621,12 @@ def verification_view(store, inventory):
                 state["selected"] = dict.fromkeys(fields, False)
                 st.session_state["review_message"] = "Confirmed locally. Corrections are in Changes; no remote write was sent."
                 if confirm_next:
-                    if review_filter == "Needs review":
-                        remaining = {r["item_id"] for r in store.verification_report(aid) if r["review_status"] != "Accepted"}
+                    if review_filter == "Exceptions":
+                        remaining = {r["item_id"] for r in store.verification_report(aid) if r["disposition"] != "Pass"}
                         following_ids = ids[index + 1:] + ids[:index + 1]
                         target = next((i for i in following_ids if i in remaining), None)
                         if target is None:
-                            st.session_state["review_message"] = "All books accepted. Review complete. No remote write was sent."
+                            st.session_state["review_message"] = "No quality exceptions remain. No remote write was sent."
                         else:
                             st.session_state[scope_key] = target
                     elif index < len(ids) - 1:
@@ -512,10 +646,7 @@ def verification_view(store, inventory):
             st.write("ABS metadata: " + ("Verified by readback (see History)" if verified else
                                         "Observed on import" if observed else "Snapshot only; accepted corrections not checked"))
             st.write("Embedded file metadata: Not checked · Folder structure: Not checked")
-            adapter = st.session_state.get("adapter")
-            if adapter and adapter.server == audit["server"] and st.button("Preview cover", key=scope + ":cover"):
-                with operation_lock(store.path):
-                    st.image(adapter.cover(iid), width=220)
+            st.caption("Use Cover gallery above to retrieve, inspect and confirm saved artwork.")
             if state.get("manual") and st.button("Show reference again"):
                 state["manual"] = False
                 st.rerun()
