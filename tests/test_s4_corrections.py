@@ -11,7 +11,14 @@ from test_verification import FakeSource
 from abs_manager.correction_plan import completion_report, library_plan, stage_selected
 from abs_manager.store import Store
 from abs_manager.verification_workflow import run_verification, start_verification
-from abs_manager.workflow import run_audit
+from abs_manager.workflow import (
+    SafetyError,
+    Workflow,
+    batch_results,
+    confirmation,
+    preview,
+    run_audit,
+)
 
 
 def fixture(tmp_path, count=3):
@@ -106,3 +113,65 @@ def test_native_plan_ui_rerender_never_fetches_or_writes(tmp_path, monkeypatch):
     assert not at.exception and len(store.corrections(aid)) == 1
     assert not api.writes and api.reads == before
     assert json.loads(json.dumps(completion_report(store, aid)))["proposals"] == 2
+
+
+def approved_batch(store, aid):
+    plan = library_plan(store, aid)
+    stage_selected(store, plan, [p["id"] for p in plan["proposals"]])
+    ids = [f["id"] for f in store.findings(aid) if f["kind"] == "confirmed_target"]
+    store.review(ids, "approved")
+    return preview(store, aid, ids)
+
+
+def test_batch_verified_success_uncertain_and_restart_accounting(tmp_path):
+    store, api, aid = fixture(tmp_path)
+    plan = approved_batch(store, aid)
+    def stop_second(done, total, title):
+        if done == 1:
+            api.fail = "after"
+    with pytest.raises(SafetyError, match="uncertain"):
+        Workflow(store, api).apply(plan, confirmation(plan), stop_second)
+    reopened = Store(store.path)
+    assert [r["status"] for r in batch_results(reopened, plan)] == ["Verified applied", "Uncertain", "Not attempted"]
+    assert len(api.writes) == 2
+    with pytest.raises(SafetyError):
+        Workflow(reopened, api).apply(plan, confirmation(plan))
+    assert len(api.writes) == 2
+    assert not any(f["status"] == "approved" for f in store.findings(aid))
+
+
+def test_protected_preview_guard_before_write_and_selection_validation(tmp_path):
+    store, api, aid = fixture(tmp_path)
+    plan = approved_batch(store, aid)
+    with pytest.raises(SafetyError, match="Duplicate"):
+        preview(store, aid, plan["selected"] * 2)
+    api.items["audio-0"]["media"]["tags"] = ["changed since preview"]
+    with pytest.raises(SafetyError):
+        Workflow(store, api).apply(plan, confirmation(plan))
+    assert not api.writes
+    assert [r["status"] for r in batch_results(store, plan)] == ["Blocked", "Not attempted", "Not attempted"]
+
+
+def test_batch_cap_empty_selection_evidence_and_later_item_guard(tmp_path):
+    store, api, aid = fixture(tmp_path)
+    plan = approved_batch(store, aid)
+    with pytest.raises(SafetyError, match="empty"):
+        preview(store, aid, [])
+    acquire(store, aid, [reference(narrators=["new evidence"])])
+    with pytest.raises(SafetyError, match="preview changed"):
+        Workflow(store, api).apply(plan, confirmation(plan))
+    assert not api.writes
+    plan = preview(store, aid, plan["selected"])
+    def move_second(done, total, title):
+        api.items["audio-1"]["relPath"] = "moved"
+    with pytest.raises(SafetyError):
+        Workflow(store, api).apply(plan, confirmation(plan), move_second)
+    assert len(api.writes) == 1
+    assert [r["status"] for r in batch_results(store, plan)] == ["Verified applied", "Blocked", "Not attempted"]
+
+
+def test_batch_cap_rejects_more_than_ten(tmp_path):
+    store, api, aid = fixture(tmp_path, 11)
+    with pytest.raises(SafetyError, match="at most 10"):
+        approved_batch(store, aid)
+    assert not api.writes

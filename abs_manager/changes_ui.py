@@ -5,7 +5,7 @@ import streamlit as st
 from .calibre import import_catalog, reconciliation_states, validate_local
 from .models import review_fields
 from .verification_ui import display, editor
-from .workflow import Workflow, confirmation, observe_selected, preview
+from .workflow import MAX_APPLY_BATCH, Workflow, batch_results, confirmation, observe_selected, preview
 
 
 def changes_view(store, audit, show_plan, progress):
@@ -45,9 +45,14 @@ def changes_view(store, audit, show_plan, progress):
     findings += [f for f in store.findings(aid) if f["actionable"] and f["status"] == "approved"
                  and f not in findings]
     books = {b.id: b for b in store.books(aid)}
+    st.caption(f"Apply at most {MAX_APPLY_BATCH} audiobooks per invocation. Execution stops on the first unsafe or uncertain result.")
+    eligible = [f for f in findings if f["item_id"] in books and books[f["item_id"]].is_audio]
+    grouped = st.multiselect("Select staged fields together", [f["id"] for f in eligible],
+                             format_func=lambda fid: next(books[f["item_id"]].values["title"] + " · " + f["field"]
+                                                          for f in eligible if f["id"] == fid))
     rows = [r for r in rows if r["item_id"] not in books or r["field"] in review_fields(books[r["item_id"]].is_audio)]
     findings = [f for f in findings if f["item_id"] in books and f["field"] in review_fields(books[f["item_id"]].is_audio)]
-    selected = []
+    selected = list(grouped)
     for iid in dict.fromkeys([r["item_id"] for r in rows] + [f["item_id"] for f in findings]):
         st.subheader(books[iid].values["title"] if iid in books else "Removed book · " + iid)
         whole_book = st.checkbox("Select book for ABS preview", key="whole:" + str(aid) + iid)
@@ -71,7 +76,8 @@ def changes_view(store, audit, show_plan, progress):
                 store.discard_correction(row["id"])
                 st.rerun()
         for finding in [f for f in findings if f["item_id"] == iid]:
-            if st.checkbox(f"Select {finding['field']}: {display(finding['target'])}", key=f"select:{finding['id']}") or whole_book:
+            checked = st.checkbox(f"Select {finding['field']}: {display(finding['target'])}", key=f"select:{finding['id']}")
+            if (checked or whole_book) and finding["id"] not in selected:
                 selected.append(finding["id"])
     if not rows and not findings:
         st.info("No confirmed corrections pending. Verify or edit fields in Match & Verify.")
@@ -90,8 +96,21 @@ def changes_view(store, audit, show_plan, progress):
         if submit:
             if not checked:
                 raise ValueError("Select the explicit confirmation checkbox.")
-            Workflow(store, adapter).apply(plan, phrase, progress())
+            st.session_state["last_batch"] = plan
+            try:
+                Workflow(store, adapter).apply(plan, phrase, progress())
+            finally:
+                st.dataframe(batch_results(store, plan), hide_index=True, width="stretch")
             st.success("Verified in ABS. Refresh Library to observe the updated inventory.")
+    batches = {}
+    for operation in store.history(audit["server"]):
+        saved = operation["data"].get("batch_plan")
+        if saved and saved["library"] == audit["library"]:
+            batches.setdefault(saved["digest"], saved)
+    if batches:
+        with st.expander("Saved batch results"):
+            bid = st.selectbox("Batch fingerprint", list(batches))
+            st.dataframe(batch_results(store, batches[bid]), hide_index=True, width="stretch")
     if st.button("Validate Calibre Changes"):
         from .preferences import load
         settings = load()

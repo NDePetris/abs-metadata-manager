@@ -10,7 +10,7 @@ from abs_manager.calibre import import_catalog
 from abs_manager.models import FIELDS
 from abs_manager.store import Store
 from abs_manager.verification import candidate
-from abs_manager.workflow import Workflow, confirmation, preview, run_audit
+from abs_manager.workflow import SafetyError, Workflow, confirmation, preview, run_audit
 
 APP = Path(__file__).resolve().parents[1] / "app.py"
 
@@ -165,6 +165,8 @@ def test_expected_correction_does_not_hide_unexplained_edition_change(setup):
     store.review([fid], "approved")
     plan = preview(store, aid, [fid])
     api.items["current-id"]["media"]["metadata"]["language"] = "fr"
-    Workflow(store, api).apply(plan, confirmation(plan))
+    with pytest.raises(SafetyError):
+        Workflow(store, api).apply(plan, confirmation(plan))
+    assert not api.writes
     new = run_audit(store, api, api.libraries()[0])
     assert store.field_decisions(new, "current-id")["title"]["decision"] == "reopened"
