@@ -78,38 +78,41 @@ class PersistentState:
     def confirm_targets(self, audit_id, item_id, targets, evidence="Human confirmed displayed values"):
         """Atomically accept values and stage differences; never approve a write."""
         with operation_lock(self.path), self.connect() as db:
-            audit, book, ident = self._scope(audit_id, item_id)
-            if (audit["read_only"] or audit["status"] != "complete"
-                    or self.latest(audit["server"], audit["library"])["id"] != audit_id):
-                raise ValueError("Complete the latest live import first.")
-            if not targets or any(f not in review_fields(book.is_audio) for f in targets):
-                raise ValueError("Select applicable metadata fields.")
-            for field, target in targets.items():
-                if field == "identifiers":
-                    if book.is_audio or not isinstance(target, dict) or set(target) - {"isbn", "asin"} or any(not isinstance(v, str) for v in target.values()):
-                        raise ValueError("Identifiers are manual Calibre corrections only.")
-                elif target != values(book)[field]:
-                    validate_target(field, target)
-            for field, target in targets.items():
-                current = values(book)[field]
-                db.execute("UPDATE corrections SET status='discarded',updated=? WHERE server=? AND library=? "
-                           "AND item_id=? AND field=? AND status IN ('pending','edited_in_calibre','verified_in_calibre','needs_review')",
-                           (timestamp(), audit["server"], audit["library"], item_id, field))
-                db.execute("UPDATE findings SET status='rejected' WHERE audit_id=? AND item_id=? AND field=? "
-                           "AND status IN ('pending','approved') AND actionable=1", (audit_id, item_id, field))
-                db.execute("INSERT INTO field_decision_history(server,library,item_id,identity_digest,field,value,"
-                           "value_digest,decision,evidence,source,created,audit_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                           (audit["server"], audit["library"], item_id, ident, field, compact(current), digest(current),
-                            "confirmed" if current == target else "correction_needed", evidence, "human", timestamp(), audit_id))
-                if target != current:
-                    db.execute("INSERT INTO corrections(server,library,item_id,identity_digest,title,field,current,"
-                               "proposed,evidence,status,created,updated,audit_id,accepted) VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)",
-                               (audit["server"], audit["library"], item_id, identity(book, field), book.values["title"],
-                                field, compact(current), compact(target), evidence, timestamp(), timestamp(), audit_id, timestamp()))
-                    if book.is_audio:
-                        db.execute("INSERT INTO findings(audit_id,item_id,field,kind,current,proposed,confidence,reason,"
-                                   "evidence,actionable,target) VALUES(?,?,?,'confirmed_target',?,?,'human',?,'{}',1,?)",
-                                   (audit_id, item_id, field, compact(current), compact(target), evidence, compact(target)))
+            self._confirm_targets(db, audit_id, item_id, targets, evidence)
+
+    def _confirm_targets(self, db, audit_id, item_id, targets, evidence):
+        audit, book, ident = self._scope(audit_id, item_id)
+        if (audit["read_only"] or audit["status"] != "complete"
+                or self.latest(audit["server"], audit["library"])["id"] != audit_id):
+            raise ValueError("Complete the latest live import first.")
+        if not targets or any(f not in review_fields(book.is_audio) for f in targets):
+            raise ValueError("Select applicable metadata fields.")
+        for field, target in targets.items():
+            if field == "identifiers":
+                if book.is_audio or not isinstance(target, dict) or set(target) - {"isbn", "asin"} or any(not isinstance(v, str) for v in target.values()):
+                    raise ValueError("Identifiers are manual Calibre corrections only.")
+            elif target != values(book)[field]:
+                validate_target(field, target)
+        for field, target in targets.items():
+            current = values(book)[field]
+            db.execute("UPDATE corrections SET status='discarded',updated=? WHERE server=? AND library=? "
+                       "AND item_id=? AND field=? AND status IN ('pending','edited_in_calibre','verified_in_calibre','needs_review')",
+                       (timestamp(), audit["server"], audit["library"], item_id, field))
+            db.execute("UPDATE findings SET status='rejected' WHERE audit_id=? AND item_id=? AND field=? "
+                       "AND status IN ('pending','approved') AND actionable=1", (audit_id, item_id, field))
+            db.execute("INSERT INTO field_decision_history(server,library,item_id,identity_digest,field,value,"
+                       "value_digest,decision,evidence,source,created,audit_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (audit["server"], audit["library"], item_id, ident, field, compact(current), digest(current),
+                        "confirmed" if current == target else "correction_needed", evidence, "human", timestamp(), audit_id))
+            if target != current:
+                db.execute("INSERT INTO corrections(server,library,item_id,identity_digest,title,field,current,"
+                           "proposed,evidence,status,created,updated,audit_id,accepted) VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)",
+                           (audit["server"], audit["library"], item_id, identity(book, field), book.values["title"],
+                            field, compact(current), compact(target), evidence, timestamp(), timestamp(), audit_id, timestamp()))
+                if book.is_audio:
+                    db.execute("INSERT INTO findings(audit_id,item_id,field,kind,current,proposed,confidence,reason,"
+                               "evidence,actionable,target) VALUES(?,?,?,'confirmed_target',?,?,'human',?,'{}',1,?)",
+                               (audit_id, item_id, field, compact(current), compact(target), evidence, compact(target)))
 
     def discard_correction(self, correction_id):
         """Archive a local target without removing evidence or touching its write journal."""
@@ -446,7 +449,7 @@ class PersistentState:
                         )
                     )
         corrections = db.execute(
-            "SELECT * FROM corrections WHERE server=? AND library=? AND status NOT IN ('identity_ambiguous','discarded','needs_review') AND NOT (abs_observed IS NOT NULL AND (status='observed_in_abs' OR calibre_verified IS NOT NULL)) AND audit_id<?",
+            "SELECT * FROM corrections WHERE server=? AND library=? AND status NOT IN ('identity_ambiguous','discarded','needs_review') AND audit_id<?",
             (audit["server"], audit["library"], audit_id),
         ).fetchall()
         db.executemany(
@@ -457,13 +460,19 @@ class PersistentState:
             "INSERT INTO candidate_decision_history(server,library,item_id,identity_digest,candidate_id,decision,evidence,created,audit_id) VALUES(?,?,?,?,?,?,?,?,?)",
             candidate_rows,
         )
+        unresolved = {op["item_id"] for op in self.unresolved(audit["server"])}
         for row in corrections:
             book = books.get(row["item_id"])
+            if row["item_id"] in unresolved:
+                continue  # Native edits cannot close or reinterpret an unresolved operation.
             if not book or (identity(book, row["field"]) != row["identity_digest"] and not self.expected_transition(audit_id, row["item_id"], self.book(row["audit_id"], row["item_id"]))):
                 db.execute(
                     "UPDATE corrections SET status='identity_ambiguous', updated=? WHERE id=?",
                     (timestamp(), row["id"]),
                 )
+            elif row["abs_observed"]:
+                if not target_observed(row["field"], json.loads(row["proposed"]), values(book).get(row["field"])):
+                    db.execute("UPDATE corrections SET status='needs_review',updated=? WHERE id=?", (timestamp(), row["id"]))
             elif row["accepted"] and values(book).get(row["field"]) == json.loads(row["current"]) and book.is_audio and row["field"] in FIELDS:
                 db.execute("UPDATE findings SET status='rejected' WHERE audit_id=? AND item_id=? AND field=? AND actionable=1 AND status='pending'",
                            (audit_id, book.id, row["field"]))

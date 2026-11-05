@@ -40,6 +40,13 @@ preferences and searchable affected-book lists. Both are collapsed native expand
 beside the queue; corrections stay in native ABS/Calibre. No retrieval occurs on render.
 See [S3 delivery and limitations](docs/S3_REVIEW.md).
 
+S4 adds collapsed Library correction proposals and Library completion / owner sign-off
+panels beside the existing queue. Native tables show before/after and evidence strength;
+grouped selection saves local targets only. Changes starts with a grouped staged-field
+selector/table; individual editors remain in a collapsed panel. Exact preview approval
+and guarded apply remain separate. Bounded external observation and Calibre validation
+retain distinct authority/sync states. See [S4 workflow](docs/S4_WORKFLOW.md).
+
 ## Quality presentation (implemented in S3)
 
 The exception queue becomes the primary workflow, ordered/filterable by quality

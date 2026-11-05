@@ -117,6 +117,11 @@ This harness uses only a fake ABS adapter, fake provider responses and `.test-tm
 
 ## Backup, restore and uncertain writes
 
+For library-wide proposals, grouped targets, bounded guarded application, external
+observation, completion reports and owner acceptance, see [S4 workflow](docs/S4_WORKFLOW.md).
+Production operation 25 remains owner-controlled recovery work; synthetic validation
+does not resolve it or complete Phase 1.
+
 Stop every app process using the workspace before backup or restore. Wait for any
 submitted operation to stop; interruption can leave durable intent requiring
 reconciliation. Retain the entire database, not just snapshots: it also contains

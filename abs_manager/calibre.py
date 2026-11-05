@@ -34,13 +34,14 @@ def import_catalog(store, audit_id, text, library=None, associations=None):
             raise ValueError("Select a completed snapshot.")
         existing = {r["item_id"]: r for r in store.rows(
             "SELECT * FROM calibre_bindings WHERE server=? AND library=?", (audit["server"], audit["library"]))}
+        all_corrections = store.corrections(audit_id)
         for book in store.books(audit_id):
             if book.is_audio or not library:
                 continue
             folder = (book.raw.get("relPath") or book.raw["path"]).replace("\\", "/").rstrip("/")
             folder_id = re.search(r"\((\d+)\)(?:/[^/]+\.epub)?$", folder, re.IGNORECASE)
             isbn = isbn_key(book.metadata.get("isbn"))
-            corrections = [r for r in store.corrections(audit_id) if r["item_id"] == book.id
+            corrections = [r for r in all_corrections if r["item_id"] == book.id
                            and r["identity_digest"] == identity(book, r["field"])
                            and r["status"] not in ("discarded", "identity_ambiguous", "needs_review")]
             bound = existing.get(book.id)
@@ -112,10 +113,42 @@ def import_catalog(store, audit_id, text, library=None, associations=None):
         with store.connect() as db:
             db.executemany("INSERT OR REPLACE INTO calibre_bindings VALUES(?,?,?,?,?,?,?)",
                            [b for b in bindings if b[2] in result])
-            db.execute("INSERT OR REPLACE INTO calibre_catalogs VALUES(?,?)", (audit_id, compact(result)))
+            previous = db.execute("SELECT data FROM calibre_catalogs WHERE audit_id=?", (audit_id,)).fetchone()
+            retained = {iid: entry for iid, entry in json.loads(previous[0] if previous else "{}").items()
+                        if not library or existing.get(iid, {}).get("calibre_library") != library}
+            db.execute("INSERT OR REPLACE INTO calibre_catalogs VALUES(?,?)", (audit_id, compact({**retained, **result})))
             db.execute("INSERT INTO calibre_catalog_history(audit_id,imported,data) VALUES(?,?,?)", (audit_id, captured, compact(catalog)))
             audit = store.audit(audit_id)
             books = {book.id: book for book in store.books(audit_id)}
+            records_by_id = {r["id"]: r for r in catalog}
+            unique_uuids = {r.get("uuid") for r in catalog if isinstance(r.get("uuid"), str) and r["uuid"].strip()}
+            # Historical timestamps remain evidence, but a later incompatible catalog reopens review.
+            for prior in db.execute("SELECT * FROM corrections WHERE server=? AND library=? AND calibre_verified IS NOT NULL AND status NOT IN ('discarded','needs_review','identity_ambiguous')",
+                                    (audit["server"], audit["library"])).fetchall():
+                book = books.get(prior["item_id"])
+                bound = existing.get(prior["item_id"])
+                if (not library or library != prior["calibre_library"] or not book
+                        or identity(book, prior["field"]) != prior["identity_digest"]
+                        or not bound or bound["identity_digest"] != identity(book)
+                        or bound["calibre_library"] != library or bound["calibre_id"] != prior["calibre_id"]
+                        or bound["calibre_uuid"] != prior["calibre_uuid"]):
+                    continue  # No authoritative observation of this correction's existing binding.
+                record = records_by_id.get(prior["calibre_id"])
+                if record is None:
+                    if len(unique_uuids) != len(catalog):
+                        continue  # An identity-incomplete export cannot establish removal.
+                elif (not isinstance(record.get("uuid"), str) or not record["uuid"].strip()
+                      or sum(r.get("uuid") == record["uuid"] for r in catalog) != 1):
+                    continue
+                elif record["uuid"] == prior["calibre_uuid"] and not {"title", "authors"} <= record.keys():
+                    continue  # Missing work fields are not a material change.
+                fresh = result.get(prior["item_id"])
+                if fresh and prior["field"] not in fresh["values"]:
+                    continue  # An omitted optional field supplies no contrary observation.
+                if not (fresh and library == prior["calibre_library"] and fresh["id"] == prior["calibre_id"]
+                        and fresh["raw"].get("uuid") == prior["calibre_uuid"]
+                        and fresh["values"].get(prior["field"]) == json.loads(prior["proposed"])):
+                    db.execute("UPDATE corrections SET status='needs_review',updated=? WHERE id=?", (captured, prior["id"]))
             rows = db.execute("SELECT * FROM corrections WHERE server=? AND library=? AND status IN ('pending','edited_in_calibre')", (audit["server"], audit["library"])).fetchall()
             for correction in rows:
                 match = result.get(correction["item_id"])
@@ -132,6 +165,30 @@ def import_catalog(store, audit_id, text, library=None, associations=None):
                     db.execute("UPDATE corrections SET status='verified_in_calibre', calibre_id=?, calibre_verified=?, updated=? WHERE id=?",
                                (match["id"], captured, captured, correction["id"]))
     return len(result)
+
+
+def reconciliation_states(store, audit_id, report=None):
+    """Describe authority and sync independently; a catalog mismatch is not proof Calibre is wrong."""
+    report = store.verification_report(audit_id) if report is None else report
+    corrections = store.corrections(audit_id)
+    result = []
+    for item in report:
+        if item["type"] != "ebook":
+            continue
+        rows = [c for c in corrections if c["item_id"] == item["item_id"] and c["status"] != "discarded"]
+        linked = not item["calibre_limitation"]
+        differences = [f for f, d in item["fields"].items() if any(
+            p["source"] == "Calibre catalog" for p in d["provenance"]) and d["status"] == "Conflict"]
+        state = ("Matching unavailable or ambiguous" if not linked else
+                 "External edit reported; revalidation required" if any(c["status"] == "edited_in_calibre" for c in rows) else
+                 "Calibre correction needs review" if any(c["status"] in ("pending", "needs_review", "identity_ambiguous") for c in rows) else
+                 "Calibre verified; ABS synchronization pending" if differences and any(c["status"] == "verified_in_calibre" for c in rows) else
+                 "Calibre differs; review authority or ABS synchronization" if differences else "Calibre and ABS agree")
+        result.append({"item_id": item["item_id"], "title": item["fields"]["title"]["value"],
+                       "state": state, "different_fields": differences,
+                       "authority": "Calibre", "abs_observation": item.get("abs_observation"),
+                       "limitation": "Catalog comparison only; covers/custom columns unavailable. A discrepancy requires source review before assuming Calibre is correct."})
+    return result
 
 
 def validate_local(store, audit_id, executable, library):

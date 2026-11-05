@@ -14,6 +14,9 @@ class SafetyError(RuntimeError):
     pass
 
 
+MAX_APPLY_BATCH = 10
+
+
 def operation_comparison(data, observed):
     """Compact intent and actual differences; no inference about journal state."""
     rows = []
@@ -173,7 +176,9 @@ def preview(store: Store, audit_id: int, selected=None) -> dict:
     if audit["status"] != "complete" or latest["id"] != audit_id or audit["read_only"]:
         raise SafetyError("Only the latest complete live audiobook audit can produce an apply preview.")
     groups = {}
-    selected = sorted(set(selected)) if selected is not None else None
+    if selected is not None and (not selected or len(selected) != len(set(selected))):
+        raise SafetyError("Duplicate or empty selected fields are not allowed.")
+    selected = sorted(selected) if selected is not None else None
     for finding in store.findings(audit_id):
         if selected is not None and finding["id"] not in selected:
             continue
@@ -183,7 +188,8 @@ def preview(store: Store, audit_id: int, selected=None) -> dict:
         if not book.is_audio:
             raise SafetyError("Ebooks are read-only. Calibre remains authoritative.")
         group = groups.setdefault(book.id, {"identity": book.identity, "before": book.values,
-                                            "changes": {}, "finding_ids": []})
+                                            "protected": book.protected(), "changes": {}, "finding_ids": [],
+                                            "approvals": {}})
         field = finding["field"]
         if field in group["changes"]:
             raise SafetyError("Multiple approved proposals for the same field. Reset one decision.")
@@ -191,8 +197,19 @@ def preview(store: Store, audit_id: int, selected=None) -> dict:
             raise SafetyError("Proposal source does not match its snapshot.")
         group["changes"][field] = finding["target"]
         group["finding_ids"].append(finding["id"])
+        group["approvals"][str(finding["id"])] = finding["reviewed"]
     for group in groups.values():
         group["payload"] = payload(group["changes"])
+    if groups:
+        evidence = {r["item_id"]: r for r in store.verification_report(audit_id)}
+        for iid, group in groups.items():
+            item = evidence[iid]
+            effective = [l.get("previous_success", l) for l in item["lookups"]]
+            group["evidence_digest"] = digest({
+                "evidence": [l for l in effective if l["state"] != "unavailable"],
+                "candidates": item["candidate_decisions"], "fields": item["human_decisions"]})
+    if len(groups) > MAX_APPLY_BATCH:
+        raise SafetyError(f"Select at most {MAX_APPLY_BATCH} books per apply invocation.")
     result = {"server": audit["server"], "library": audit["library"], "audit_id": audit_id,
               "books": list(groups.values())}
     if selected is not None:
@@ -207,6 +224,58 @@ def confirmation(plan: dict, action="APPLY") -> str:
     return f"{action} {plan['digest'][:12]}"
 
 
+def observe_selected(store, adapter, audit_id, selected):
+    """Bounded read-only refresh; untouched books retain their old capture provenance.
+
+    A new snapshot expires write approvals and reuses import reconciliation. All
+    requested reads and identities must validate before replacing the current view.
+    """
+    from .store import now
+    with operation_lock(store.path):
+        audit = store.audit(audit_id)
+        if (not selected or len(selected) > 25 or len(selected) != len(set(selected))
+                or audit["status"] != "complete" or audit["read_only"]
+                or store.latest(audit["server"], audit["library"])["id"] != audit_id):
+            raise SafetyError("Select 1–25 distinct books from the latest complete live snapshot.")
+        if adapter.server != audit["server"] or store.unresolved(audit["server"]):
+            raise SafetyError("Connect to the original server and reconcile unresolved History first.")
+        library = next((lib for lib in adapter.libraries() if lib["id"] == audit["library"]), None)
+        if library is None or (audit["library_identity"] and library_identity(library) != json.loads(audit["library_identity"])):
+            raise SafetyError("Library identity changed. Run a full import.")
+        books = {b.id: b for b in store.books(audit_id)}
+        observed = {}
+        for iid in selected:
+            if iid not in books:
+                raise SafetyError("Selected book is not in this snapshot.")
+            live = Book(adapter.item(iid))
+            if live.identity != books[iid].identity or live.raw.get("isMissing") or live.raw.get("isInvalid"):
+                raise SafetyError("Book moved, changed identity or became unavailable. Run a full import.")
+            observed[iid] = live
+        fresh_id = store.start_audit(audit["server"], audit["library"], audit["name"],
+                                     library_identity=library_identity(library))
+        try:
+            for iid, original in books.items():
+                store.add_book(fresh_id, observed.get(iid, original))
+            # Catalog is historic authority evidence, not a new Calibre observation.
+            with store.connect() as db:
+                from .persistent_state import identity
+                catalog_rows = store.rows("SELECT data FROM calibre_catalogs WHERE audit_id=?", (audit_id,))
+                if catalog_rows:
+                    catalog = json.loads(catalog_rows[0]["data"])
+                    compatible = {iid: value for iid, value in catalog.items() if iid in books
+                                  and identity(books[iid]) == identity(observed.get(iid, books[iid]))}
+                    db.execute("INSERT INTO calibre_catalogs VALUES(?,?)", (fresh_id, json.dumps(compatible)))
+                for iid in books:
+                    db.execute("INSERT INTO verification_annotations VALUES(?,?,?,?)",
+                               (fresh_id, iid, "observation", json.dumps({"captured": now() if iid in observed else None,
+                                "source_audit": audit_id, "fresh_abs": iid in observed})))
+            store.finish_audit(fresh_id)
+        except BaseException:
+            store.finish_audit(fresh_id, "interrupted", "Read-only refresh interrupted; no remote update submitted.")
+            raise
+        return fresh_id
+
+
 def guard(book: Book, identity: dict, values: dict):
     if book.identity != identity:
         raise SafetyError("Live identity, library, or path changed. Run a fresh audit; no ID migration is allowed.")
@@ -214,6 +283,23 @@ def guard(book: Book, identity: dict, values: dict):
         raise SafetyError("Live metadata differs from the expected source. Run a fresh audit.")
     if book.raw.get("isMissing") or book.raw.get("isInvalid") or not book.is_audio:
         raise SafetyError("Live item is missing, invalid, or not an audiobook.")
+
+
+def batch_results(store, plan):
+    """Reconstruct progress from the existing per-item journals after restart."""
+    history = [r for r in store.history(plan["server"]) if r["action"] == "apply"
+               and r["data"].get("preview_digest") == plan["digest"]]
+    rows = []
+    for group in plan["books"]:
+        iid = group["identity"]["id"]
+        row = next((r for r in history if r["item_id"] == iid), None)
+        status = ({"verified": "Verified applied", "not_applied": "Failed without application",
+                   "failed": "Failed without application", "skipped": "Blocked",
+                   "prepared": "Uncertain", "applied": "Uncertain", "uncertain": "Uncertain",
+                   "reverted": "Reverted"}.get(row["state"], "Blocked") if row else "Not attempted")
+        rows.append({"item_id": iid, "title": group["before"]["title"], "status": status,
+                     "operation_id": row["id"] if row else None})
+    return rows
 
 
 def verify(book: Book, data: dict, values: dict, *, intended=False):
@@ -245,25 +331,51 @@ class Workflow:
             fresh = preview(self.store, plan["audit_id"], plan.get("selected"))
             if fresh != plan:
                 raise SafetyError("Approvals or preview changed. Review and confirm the new preview.")
-            self._ready(plan["server"], plan["library"])
+            try:
+                self._ready(plan["server"], plan["library"])
+            except BaseException:
+                self._expire_batch(plan)
+                raise
             operations = []
             for index, group in enumerate(plan["books"], 1):
                 identity = group["identity"]
                 try:
+                    self._ready(plan["server"], plan["library"])
+                    current = preview(self.store, plan["audit_id"], group["finding_ids"])
+                    if current["books"] != [group]:
+                        raise SafetyError("Selected targets or approvals changed during execution.")
                     live = Book(self.adapter.item(identity["id"]))
                     guard(live, identity, group["before"])
+                    if live.protected() != group["protected"]:
+                        raise SafetyError("Protected metadata changed since preview.")
                 except Exception as exc:
                     self.store.record(plan["server"], plan["library"], identity["id"], "apply",
                                       "skipped" if isinstance(exc, SafetyError) else "failed",
-                                      group, "Live validation failed. No update submitted; run a fresh audit.")
+                                      {**group, "batch_plan": plan, "preview_digest": plan["digest"]},
+                                      "Live validation failed. No update submitted; run a fresh audit.")
+                    self._expire_batch(plan)
                     raise SafetyError("Live validation failed. Batch stopped without updating this book.") from exc
                 after = {**live.values, **group["changes"]}
                 data = {**group, "after": after, "protected": live.protected(), "pre_update_raw": live.raw,
-                        "audit_id": plan["audit_id"], "preview_digest": plan["digest"]}
-                operation_id = self._execute(plan["server"], plan["library"], "apply", data)
+                        "audit_id": plan["audit_id"], "preview_digest": plan["digest"], "batch_plan": plan}
+                try:
+                    operation_id = self._execute(plan["server"], plan["library"], "apply", data)
+                except BaseException:
+                    self._expire_batch(plan)
+                    raise
                 operations.append(operation_id)
-                progress(index, len(plan["books"]), live.values["title"])
+                try:
+                    progress(index, len(plan["books"]), live.values["title"])
+                except BaseException:
+                    self._expire_batch(plan)
+                    raise
             return operations
+
+    def _expire_batch(self, plan):
+        with self.store.connect() as db:
+            for group in plan["books"]:
+                for fid in group["finding_ids"]:
+                    db.execute("UPDATE findings SET status='pending' WHERE id=? AND status='approved'", (fid,))
 
     def _execute(self, server: str, library: str, action: str, data: dict) -> int:
         item_id = data["identity"]["id"]

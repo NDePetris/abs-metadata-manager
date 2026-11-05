@@ -490,6 +490,8 @@ def verification_view(store, inventory):
             reasons = sorted({d["reason_code"] for r in report for d in r["fields"].values() if d["disposition"] != "Pass"})
             reason_filter = st.selectbox("Reason", ["Any"] + reasons, key=scope_key + ":reason")
         library_review_controls(store, audit, report)
+        from .correction_plan_ui import plan_controls
+        plan_controls(store, audit, report)
         previous, selector, following, filter_col = st.columns([1.25, 5, 1, 2], vertical_alignment="bottom", gap="small")
         review_filter = filter_col.selectbox("Quality", ["Exceptions", "Needs attention", "Needs evidence", "Pass", "All books"],
                                             key=scope_key + ":filter", label_visibility="collapsed")
