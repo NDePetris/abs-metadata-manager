@@ -445,13 +445,19 @@ def assess(book: Book, evidence: list[dict] = (), *, selected: str | None = None
         elif field == "embedded":
             status, reason = ("Unverified", "Captured tags are evidence, not authority; composer is not assumed narrator.") if value else (
                 "Unverified", "Embedded tags unavailable in snapshot.")
-            checks = []
+            checks, mismatches = [], []
             for tag in ("title", "album", "artist"):
                 if isinstance(value.get(tag), str):
                     reference = saved["title"] if tag != "artist" else ", ".join(saved["authors"])
-                    checks.append(canon(value[tag]) == canon(reference or ""))
+                    agrees = canon(value[tag]) == canon(reference or "")
+                    checks.append(agrees)
+                    if not agrees:
+                        mismatches.append(tag)
             if checks:
                 status = "Consistent" if all(checks) else "Conflict"
+                if mismatches:
+                    reason = ("Captured embedded audio " + ", ".join(mismatches) +
+                              " differs from saved ABS metadata. Source-file cleanup is deferred.")
                 reason += " Stale tags can reappear after reimport without making saved metadata wrong."
         elif field == "series_position" and not saved["series"]:
             status, reason = "Not applicable", "No series assigned; standalone books need no position."
@@ -467,7 +473,7 @@ def assess(book: Book, evidence: list[dict] = (), *, selected: str | None = None
         relevant = [f.to_dict() for f in findings if f.field == field]
         # Formatting suggestions and weak folder mismatches are not confirmed factual errors.
         if field not in ("chapters", "cover", "embedded") and any(f["kind"] == "conflict" for f in relevant):
-            status, reason = "Conflict", "Local evidence differs; inspect provenance before deciding which value is correct."
+            status, reason = "Conflict", " ".join(f["reason"] for f in relevant if f["kind"] == "conflict")
         if field == "series" and not value and any(f["kind"] == "missing" for f in relevant):
             status, reason = "Missing", "Explicit series evidence is present in the title; confirm the correct assignment."
         if field == "subtitle" and value and (canon(value) == canon(saved["title"] or "") or re.search(

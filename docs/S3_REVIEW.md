@@ -55,6 +55,20 @@ justified. Narrow policy extensions consume cover retrieval and category hygiene
 evidence through the existing `quality_policy`; there is no second assessment engine.
 No conclusions about actual provider coverage in the real library are claimed.
 
+Finalization corrects an embedded-title false positive reported for Edgedancer:
+`Stormlight Archive 02.5 - Edgedancer` in captured audio tags no longer makes the
+clean saved `Edgedancer` title a conflict. Audit retains the discrepancy as an
+informational embedded-source observation; verification names the disagreeing
+embedded fields and keeps their cleanup deferred. Folder agreement alone still
+means Needs evidence, missing audiobook narrators still need attention, and credible
+external contradictions, human decisions and outstanding corrections retain their
+existing treatment. This change neither stages title corrections nor edits files.
+Six synthetic regressions cover two harmless prefixes, independent corroboration,
+a credible external title contradiction, durable decisions/pending corrections and
+the displayed explanation. Finalization validation: **382 passed, 4 skipped in
+104.52 seconds**; Ruff, dependency consistency, launcher and whitespace checks pass.
+The skips remain the three protected personal-CLI-profile cases and private export.
+
 ## Measured performance
 
 Windows / Python 3.13.14, isolated temporary SQLite databases, 100 synthetic
