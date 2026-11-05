@@ -11,6 +11,11 @@ from .store import now
 
 MEDIA_FIELDS = ("tags", "duration", "numTracks", "numAudioFiles", "numChapters", "numEbooks", "ebookFormat")
 CHAPTER_FIELDS = ("id", "title", "start", "end", "position", "index")
+REVIEW_METADATA_FIELDS = {
+    "genres": "genres", "publishedYear": "publication_year", "publishedDate": "publication_date",
+    "publisher": "publisher", "language": "language", "isbn": "isbn", "asin": "asin",
+    "identifiers": "identifiers", "edition": "edition", "abridged": "abridged",
+}
 AUDIO_FIELDS = ("index", "trackNumFromMeta", "discNumFromMeta", "format", "duration", "bitRate",
                 "language", "codec", "timeBase", "channels", "channelLayout", "sampleRate", "bitDepth")
 EMBEDDED_FIELDS = (
@@ -60,13 +65,44 @@ def _chapters(chapters):
     return None
 
 
+def _credits(value):
+    """Normalize names into credit objects while retaining supplied roles and empty values."""
+    if isinstance(value, (str, dict)) and value:
+        value = [value]
+    if isinstance(value, list):
+        return [{"name": credit} if isinstance(credit, str) else credit for credit in value]
+    return value
+
+
+def _review_values(book, current):
+    metadata = current["metadata"]
+    managed = (field for field in FIELDS if field in metadata and (book.is_audio or field != "narrators"))
+    review = _sanitize(_pick(book.values, managed))
+    review.update({target: metadata[key] for key, target in REVIEW_METADATA_FIELDS.items() if key in metadata})
+    for source, target in (("translator", "translators"), ("translators", "translators"),
+                           ("contributors", "contributors")):
+        if source in metadata:
+            review[target] = _credits(metadata[source])
+    if "description" in metadata:
+        description = metadata["description"]
+        review["description"] = {"$ref": "#/current/metadata/description"} if description else description
+    if "tags" in current:
+        review["tags"] = current["tags"]
+    if book.is_audio and "chapters" in current:
+        chapters = current["chapters"]
+        review["chapters"] = None if chapters is None else [
+            _pick(chapter, ("title", "position", "index", "start", "end")) for chapter in chapters
+        ]
+    if "cover" in current:
+        review["cover_present"] = current["cover"]["present"]
+    return review
+
+
 def _current_and_file_evidence(book):
     media = book.raw["media"]
-    current = {"metadata": book.metadata, **_pick(media, MEDIA_FIELDS),
-               "cover": {"present": bool(media.get("coverPath"))}}
-    suffix = str(media.get("coverPath", "")).rsplit(".", 1)[-1].lower()
-    if suffix in ("jpg", "jpeg", "png", "webp", "gif", "avif", "bmp"):
-        current["cover"]["format_hint"] = suffix
+    current = {"metadata": book.metadata, **_pick(media, MEDIA_FIELDS)}
+    if "coverPath" in media:
+        current["cover"] = {"present": bool(media["coverPath"])}
     if "chapters" in media:
         current["chapters"] = _chapters(media["chapters"])
     ebook = media.get("ebookFile")
@@ -82,8 +118,6 @@ def _current_and_file_evidence(book):
         details = _pick(audio, AUDIO_FIELDS)
         if "chapters" in audio:
             details["chapters"] = _chapters(audio["chapters"])
-        if "embeddedCoverArt" in audio:
-            details["embedded_cover_present"] = bool(audio["embeddedCoverArt"])
         tags = audio.get("metaTags")
         if isinstance(tags, dict):
             details["embedded_tags"] = {
@@ -97,9 +131,13 @@ def _current_and_file_evidence(book):
     return current, source_files
 
 
-def _reference_evidence(report):
+def _reference_evidence(report, cover_present):
     references, findings = {}, {}
     for field, details in report["fields"].items():
+        if field == "cover":
+            if cover_present is False:
+                findings[field] = {"status": "Missing"}
+            continue
         assessment = _pick(details, ("status", "disposition", "reason_code", "quality_applicable", "hygiene"))
         if details["reason_code"] not in ("optional_absent", "not_applicable", "inspection_deferred",
                                           "evidence_insufficient"):
@@ -155,7 +193,9 @@ def _export(store, audit_id, exported_at):
     for book in books:
         fingerprint = identity(book)
         current, files = _current_and_file_evidence(book)
-        evidence = _reference_evidence(reports[book.id])
+        current = _sanitize(current)
+        review = _review_values(book, current)
+        evidence = _reference_evidence(reports[book.id], review.get("cover_present"))
         evidence["source_files"] = files
         binding = bindings.get(book.id)
         if not book.is_audio and binding and binding["identity_digest"] == fingerprint:
@@ -165,7 +205,7 @@ def _export(store, audit_id, exported_at):
             }
         proposals = staged[book.id] + [
             _pick(row, ("field", "proposed")) for row in corrections[book.id]
-            if identity(book, row["field"]) == row["identity_digest"]
+            if row["field"] != "cover" and identity(book, row["field"]) == row["identity_digest"]
         ]
         observation = _pick(reports[book.id]["abs_observation"], ("source_audit", "fresh_abs", "captured"))
         if audit["read_only"]:
@@ -176,7 +216,8 @@ def _export(store, audit_id, exported_at):
             "media_type": "audiobook" if book.is_audio else "ebook",
             "managed_values_digest": digest(book.values),
             "observation": observation,
-            "current": _sanitize(current),
+            "current": current,
+            "review_values": review,
             "evidence": _sanitize(evidence),
             "existing_corrections": _sanitize([unique_proposals[key] for key in sorted(unique_proposals)]),
         })
@@ -193,7 +234,8 @@ def _export(store, audit_id, exported_at):
         "authority": {
             "audiobook": {"current": "Audiobookshelf", "guarded_write_fields": [] if audit["read_only"] else list(FIELDS),
                           "other_fields": "native_or_manual"},
-            "ebook": {"current": "Audiobookshelf", "corrections": "Calibre", "guarded_write_fields": []},
+            "ebook": {"current": "Audiobookshelf", "corrections": "Calibre", "guarded_write_fields": [],
+                      "other_fields": "manual_in_calibre"},
         },
         "category_preferences": _sanitize(preferences),
         "books": records,

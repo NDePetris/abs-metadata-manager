@@ -9,7 +9,7 @@ from test_streamlined import app, page, widget
 from test_verification import FakeSource
 
 from abs_manager.calibre import import_catalog
-from abs_manager.models import FIELDS, Book, digest
+from abs_manager.models import FIELDS, Book, digest, payload
 from abs_manager.persistent_state import identity
 from abs_manager.review_export import export_review_bundle
 from abs_manager.store import Store
@@ -40,6 +40,7 @@ def review_books():
                                             "tagISBN": "9780140328721", "tagAPIKey": "secret-tag"})
     audio["userMediaProgress"] = {"userId": "secret-user", "currentTime": 12.25}
     audio["bookmarks"] = [{"title": "secret-bookmark"}]
+    metadata["identifiers"]["accessToken"] = "secret-identifier"
     metadata["custom"]["authorization"] = "secret-header"
     metadata["custom"]["filePath"] = "secret-path"
     metadata["custom"]["nested"] = [{"accessToken": "secret-token", "editionNote": "Retain me"}]
@@ -81,23 +82,41 @@ def test_complete_metadata_evidence_and_provenance(tmp_path, review_books):
     assert first["managed_values_digest"] == digest(Book(audio).values)
     assert first["observation"]["fresh_abs"] is True
     current = first["current"]
-    expected = {**audio["media"]["metadata"], "custom": {
+    expected = {**audio["media"]["metadata"], "identifiers": {"oclc": "12345"}, "custom": {
         "null": None, "blank": "", "list": [], "labels": ["漢字"],
         "nested": [{"editionNote": "Retain me"}], "source": "[redacted]", "localRef": "[redacted]",
     }}
     assert current["metadata"] == expected
     assert current["tags"] == audio["media"]["tags"]
     assert current["duration"] == 1000
-    assert current["cover"] == {"present": True, "format_hint": "jpg"}
+    assert current["cover"] == {"present": True}
     assert current["chapters"] == [{"id": 0, "title": "Début", "start": 0, "end": 12.25, "position": 1}]
     assert first["evidence"]["source_files"]["audio_files"] == [{
-        "index": 1, "duration": 1000.25, "codec": "aac", "embedded_cover_present": True,
+        "index": 1, "duration": 1000.25, "codec": "aac",
         "embedded_tags": {"tagTitle": "Alternate title", "tagDescription": "Alternate description",
                           "tagISBN": "9780140328721"},
     }]
+    assert first["review_values"] == {
+        **Book(audio).values,
+        "description": {"$ref": "#/current/metadata/description"},
+        "genres": ["Science Fiction"], "tags": ["  keep as-is  ", "漢字"],
+        "translators": [{"name": "Júlia"}],
+        "contributors": [{"name": "Júlia", "role": "translator"}, {"name": "Aki", "role": "editor"}],
+        "publication_year": "2024", "publication_date": "2024-01-03", "publisher": "Éditions", "language": "en",
+        "isbn": "9780140328721", "asin": "B012345678", "identifiers": {"oclc": "12345"},
+        "edition": "Unabridged", "abridged": False, "cover_present": True,
+        "chapters": [{"title": "Début", "start": 0, "end": 12.25, "position": 1}],
+    }
+    assert data.count(current["metadata"]["description"].encode()) == 1
+    managed = {field: first["review_values"][field] for field in FIELDS if field != "subtitle"}
+    assert payload({**managed, "subtitle": "New subtitle"})["metadata"] == {
+        **managed, "subtitle": "New subtitle", "authors": [{"name": "Áda"}, {"name": "David"}],
+    }
+    assert "cover" not in first["evidence"]["quality"]
     assert first["evidence"]["quality"]["genres"]["reason_code"] == "category_problem"
     assert first["existing_corrections"] == [{"field": "subtitle", "proposed": "Proposed subtitle"}]
     assert "subtitle" not in second["current"]["metadata"]
+    assert {"subtitle", "narrators", "chapters"}.isdisjoint(second["review_values"])
     assert second["current"]["ebook_format"] == {"ebookFormat": "epub", "ext": ".epub"}
     assert second["evidence"]["calibre_binding"]["calibre_id"] == 42
     assert second["evidence"]["references"]["title"][0]["source"] == "Calibre catalog"
@@ -109,6 +128,30 @@ def test_complete_metadata_evidence_and_provenance(tmp_path, review_books):
     assert export_review_bundle(store, aid, exported_at=result.pop("exported_at")) == data
     assert json.loads(export_review_bundle(store, aid))["content_digest"] == result["content_digest"]
     assert result.pop("content_digest") == digest(result)
+
+
+def test_review_values_preserve_absence_null_and_empty(tmp_path):
+    missing, null, empty = (clean(name) for name in ("absent", "null", "empty"))
+    for field in ("subtitle", "description", "genres"):
+        del missing["media"]["metadata"][field]
+    for field in ("tags", "chapters", "coverPath"):
+        del missing["media"][field]
+    null["media"]["metadata"].update(subtitle=None, description=None, genres=None, translators=None)
+    null["media"].update(tags=None, coverPath=None)
+    empty["media"]["metadata"].update(subtitle="", description="", genres=[], translator="")
+    empty["media"].update(tags=[], chapters=[], coverPath="")
+    store = Store(tmp_path / "test.sqlite")
+    aid = snapshot(store, [missing, null, empty])
+    books = {b["item_id"]: b for b in json.loads(export_review_bundle(store, aid))["books"]}
+    fields = {"subtitle", "description", "genres", "tags", "translators", "cover_present", "chapters"}
+    assert fields.isdisjoint(books["absent"]["review_values"])
+    for name, expected in (("null", [None, None, None, None, None]),
+                           ("empty", ["", "", [], [], ""])):
+        review = books[name]["review_values"]
+        assert [review[field] for field in ("subtitle", "description", "genres", "tags", "translators")] == expected
+        assert review["cover_present"] is False
+        assert books[name]["evidence"]["quality"]["cover"] == {"status": "Missing"}
+    assert books["empty"]["review_values"]["chapters"] == []
 
 
 def test_all_books_with_and_without_evidence(tmp_path, monkeypatch):
@@ -157,6 +200,7 @@ def test_import_export_uses_latest_completed_and_only_generates_on_click(setup, 
     store.finish_audit(running, "interrupted")
     reads = list(api.reads)
     monkeypatch.setattr(FakeAdapter, "page", lambda *a: pytest.fail("Export must use saved inventory"))
+    monkeypatch.setattr(FakeAdapter, "cover", lambda *a: pytest.fail("Export must not retrieve artwork"), raising=False)
     at = app(store, api, monkeypatch)
     assert "review_bundle" not in at.session_state
     widget(at, "button", "Export metadata for ChatGPT").click().run()
