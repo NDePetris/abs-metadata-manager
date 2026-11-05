@@ -258,8 +258,13 @@ def observe_selected(store, adapter, audit_id, selected):
                 store.add_book(fresh_id, observed.get(iid, original))
             # Catalog is historic authority evidence, not a new Calibre observation.
             with store.connect() as db:
-                db.execute("INSERT INTO calibre_catalogs SELECT ?,data FROM calibre_catalogs WHERE audit_id=?",
-                           (fresh_id, audit_id))
+                from .persistent_state import identity
+                catalog_rows = store.rows("SELECT data FROM calibre_catalogs WHERE audit_id=?", (audit_id,))
+                if catalog_rows:
+                    catalog = json.loads(catalog_rows[0]["data"])
+                    compatible = {iid: value for iid, value in catalog.items() if iid in books
+                                  and identity(books[iid]) == identity(observed.get(iid, books[iid]))}
+                    db.execute("INSERT INTO calibre_catalogs VALUES(?,?)", (fresh_id, json.dumps(compatible)))
                 for iid in books:
                     db.execute("INSERT INTO verification_annotations VALUES(?,?,?,?)",
                                (fresh_id, iid, "observation", json.dumps({"captured": now() if iid in observed else None,
@@ -326,7 +331,11 @@ class Workflow:
             fresh = preview(self.store, plan["audit_id"], plan.get("selected"))
             if fresh != plan:
                 raise SafetyError("Approvals or preview changed. Review and confirm the new preview.")
-            self._ready(plan["server"], plan["library"])
+            try:
+                self._ready(plan["server"], plan["library"])
+            except BaseException:
+                self._expire_batch(plan)
+                raise
             operations = []
             for index, group in enumerate(plan["books"], 1):
                 identity = group["identity"]
@@ -355,7 +364,11 @@ class Workflow:
                     self._expire_batch(plan)
                     raise
                 operations.append(operation_id)
-                progress(index, len(plan["books"]), live.values["title"])
+                try:
+                    progress(index, len(plan["books"]), live.values["title"])
+                except BaseException:
+                    self._expire_batch(plan)
+                    raise
             return operations
 
     def _expire_batch(self, plan):

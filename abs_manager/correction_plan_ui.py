@@ -1,5 +1,6 @@
 """Native library proposal review; acquisition and mutations require explicit submits."""
 import json
+from collections import Counter
 
 import streamlit as st
 
@@ -18,16 +19,23 @@ def plan_controls(store, audit, report):
         strength = cols[2].selectbox("Evidence strength", ["Any", "Recording-backed", "Individual review"])
         rows = [p for p in plan["proposals"] if (media == "Any" or p["type"] == media)
                 and (field == "Any" or p["field"] == field) and (strength == "Any" or p["strength"] == strength)]
+        duplicate_titles = Counter(p["title"] for p in plan["proposals"])
+
+        def label(p):
+            return p["title"] + " · " + p["field"] + (" · " + p["item_id"] if duplicate_titles[p["title"]] > 1 else "")
         st.dataframe([{"Book": p["title"], "Field": p["field"], "Current": display(p["current"]),
                        "Proposed": display(p["target"]), "Evidence": p["strength"], "Action": p["action"]}
                       for p in rows], hide_index=True, width="stretch")
         if rows:
             pid = st.selectbox("Inspect proposal evidence", [p["id"] for p in rows],
-                               format_func=lambda v: next(p["title"] + " · " + p["field"] for p in rows if p["id"] == v))
-            st.json(next(p for p in rows if p["id"] == pid))
+                               format_func=lambda v: next(label(p) for p in rows if p["id"] == v))
+            inspected = next(p for p in rows if p["id"] == pid)
+            st.caption(inspected["reason"] + " · " + inspected["risk"])
+            with st.expander("Evidence details and original identity"):
+                st.json(inspected)
         eligible = {p["id"]: p for p in rows if p["grouped"]}
         chosen = st.multiselect("Supported audiobook targets", list(eligible),
-                                format_func=lambda v: eligible[v]["title"] + " · " + eligible[v]["field"],
+                                format_func=lambda v: label(eligible[v]),
                                 key="proposals:" + plan["digest"])
         if chosen:
             st.dataframe([{"Book": eligible[i]["title"], "Field": eligible[i]["field"],
@@ -42,7 +50,17 @@ def plan_controls(store, audit, report):
                            "correction-plan.json", "application/json")
     with st.expander("Library completion and owner sign-off"):
         result = completion_report(store, audit["id"], report, plan)
-        st.json(result)
+        st.dataframe([{"Measure": "Books assessed", "Count": result["books"]},
+                      {"Measure": "Applicable fields", "Count": result["applicable_fields"]},
+                      *[{"Measure": k, "Count": v} for k, v in result["quality"].items()],
+                      *[{"Measure": k.replace("_", " "), "Count": v} for k, v in result["pass_bases"].items()],
+                      {"Measure": "Outstanding proposals", "Count": result["proposals"]},
+                      {"Measure": "Artwork unresolved", "Count": result["artwork_unresolved"]},
+                      {"Measure": "Category problems", "Count": result["category_problems"]},
+                      {"Measure": "Unresolved write journals", "Count": len(result["unresolved_journals"])}],
+                     hide_index=True, width="stretch")
+        with st.expander("Execution, synchronization and coverage details"):
+            st.json(result)
         st.dataframe(plan["inventory"], hide_index=True, width="stretch")
         st.caption("Review acceptance, current-value quality, write execution and observed synchronization are separate. Synthetic validation cannot complete production sign-off.")
         st.markdown("Before owner sign-off:\n\n- Back up the workspace and reconcile unresolved History entries.\n- Acquire remaining evidence and inspect unresolved editions/artwork.\n- Review and stage supported targets, then separately preview and authorize writes.\n- Correct ebooks in Calibre and native-only metadata in ABS.\n- Revalidate Calibre, observe fresh ABS values, and export this report.\n- Record remaining exceptions and owner validation in #16.")

@@ -47,7 +47,10 @@ Calibre verification and later ABS sync observation are separate.
   acquisition over existing snapshots; see [engine contract](docs/S2_ENGINE.md).
 - S3 supplies the quality exception queue, explicit saved-cover gallery/review and
   library genre/tag preferences; see [S3 delivery](docs/S3_REVIEW.md).
-  Cover/tag writers are not authorized by this roadmap. S4 remains deferred.
+  Cover/tag writers are not authorized by this roadmap.
+- S4 supplies library proposals, grouped local targets, bounded guarded application,
+  explicit external observation and completion reports; see [workflow](docs/S4_WORKFLOW.md).
+  Actual Phase 1 library completion remains owner-controlled under #16.
 - Source portability (embedded tags, files, folders and sidecars), chapter
   remediation, new providers, AI adjudication and background work remain deferred.
 

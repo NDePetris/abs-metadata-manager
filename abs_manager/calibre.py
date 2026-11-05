@@ -34,13 +34,14 @@ def import_catalog(store, audit_id, text, library=None, associations=None):
             raise ValueError("Select a completed snapshot.")
         existing = {r["item_id"]: r for r in store.rows(
             "SELECT * FROM calibre_bindings WHERE server=? AND library=?", (audit["server"], audit["library"]))}
+        all_corrections = store.corrections(audit_id)
         for book in store.books(audit_id):
             if book.is_audio or not library:
                 continue
             folder = (book.raw.get("relPath") or book.raw["path"]).replace("\\", "/").rstrip("/")
             folder_id = re.search(r"\((\d+)\)(?:/[^/]+\.epub)?$", folder, re.IGNORECASE)
             isbn = isbn_key(book.metadata.get("isbn"))
-            corrections = [r for r in store.corrections(audit_id) if r["item_id"] == book.id
+            corrections = [r for r in all_corrections if r["item_id"] == book.id
                            and r["identity_digest"] == identity(book, r["field"])
                            and r["status"] not in ("discarded", "identity_ambiguous", "needs_review")]
             bound = existing.get(book.id)

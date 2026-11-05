@@ -15,6 +15,7 @@ def library_plan(store, audit_id, report=None):
     if audit["status"] != "complete":
         raise ValueError("Select a completed snapshot.")
     report = store.verification_report(audit_id) if report is None else report
+    report = sorted(report, key=lambda r: r["item_id"])
     staged = {(r["item_id"], r["field"]) for r in store.corrections(audit_id)
               if r["status"] not in ("discarded", "observed_in_abs")}
     staged.update((f["item_id"], f["field"]) for f in store.findings(audit_id)
@@ -29,7 +30,12 @@ def library_plan(store, audit_id, report=None):
             if (item["item_id"], field) in staged or details["disposition"] == "Pass":
                 continue
             options = []
+            if item["type"] == "ebook":
+                options = [(p["value"], {**p, "scope": "Calibre authority", "signals": [], "contradictions": []})
+                           for p in details["provenance"] if p["source"] == "Calibre catalog"]
             for m in item["matches"]:
+                if item["type"] == "ebook":
+                    continue  # Public audiobook/work candidates cannot override Calibre authority.
                 if m["rejected"] or m["classification"] in ("wrong_work", "different_recording"):
                     continue
                 supplied = reference_values(m)
@@ -49,6 +55,12 @@ def library_plan(store, audit_id, report=None):
                 strong = strong and not details.get("evidence_issue") and (
                     len(options) == 1 or all("asin" in p["signals"] for _, p in options))
                 strong = strong and not blocked and all(l.get("state") == "ok" for l in item["lookups"])
+                strong = strong and not any(not m["rejected"] and m["contradictions"]
+                                            and {"asin", "isbn"} & set(m["signals"]) for m in item["matches"])
+                if field == "series":
+                    # A field replacement must not silently drop another series relationship.
+                    strong = strong and {s["name"] for s in details["value"]} <= {
+                        s["name"] for s in options[0][0]}
                 choices = [(options[0][0], "Recording-backed" if strong else "Individual review",
                             [p for _, p in options], details["reason"], strong)]
             elif options:
@@ -58,6 +70,8 @@ def library_plan(store, audit_id, report=None):
                            for f in details["local_findings"] if f["actionable"]
                            and field != "narrators" and f["kind"] not in ("manual", "confirmed_target")]
             for target, strength, evidence, reason, grouped in choices[:1]:
+                if field in ("authors", "narrators") and not target:
+                    continue  # Empty provider credits cannot justify clearing required contributors.
                 try:
                     validate_target(field, target)
                 except ValueError:
@@ -75,7 +89,10 @@ def library_plan(store, audit_id, report=None):
         manual = [f for f, d in item["fields"].items() if d["quality_applicable"]
                   and d["disposition"] != "Pass" and (f in ("cover", "genres", "tags") or item["type"] == "ebook")]
         category = ("Already acceptable" if item["disposition"] == "Pass" else
-                    "Proposed corrections" if len(proposals) > start else
+                    "Proposed corrections" if len(proposals) > start or any(iid == item["item_id"] for iid, _ in staged) else
+                    "Needs more evidence" if item["type"] == "audiobook" and any(
+                        d["quality_applicable"] and d["disposition"] != "Pass" for f, d in item["fields"].items()
+                        if f not in ("cover", "genres", "tags")) else
                     "Manual/native remediation" if manual else "Needs more evidence")
         inventory.append({"item_id": item["item_id"], "title": item["fields"]["title"]["value"],
                           "type": item["type"], "category": category, "manual_fields": manual,
@@ -117,13 +134,17 @@ def completion_report(store, audit_id, report=None, plan=None):
     fields = [d for r in report for d in r["fields"].values() if d["quality_applicable"]]
     corrections = store.corrections(audit_id)
     from .verification_workflow import evidence_coverage
+    observed = [c for c in corrections if c["abs_observed"] and c["status"] not in ("needs_review", "identity_ambiguous", "discarded")]
+    journals = [r for r in store.history(plan["server"]) if r["library"] == plan["library"]]
     return {"audit_id": audit_id, "books": len(report), "applicable_fields": len(fields),
             "quality": dict(Counter(d["disposition"] for d in fields)),
             "pass_bases": dict(Counter(d["reason_code"] for d in fields if d["disposition"] == "Pass")),
             "review": dict(Counter(r["review_status"] for r in report)),
             "proposals": len(plan["proposals"]), "corrections": dict(Counter(c["status"] for c in corrections)),
-            "abs_observed": sum(bool(c["abs_observed"]) for c in corrections),
-            "calibre_verified_waiting_abs": sum(bool(c["calibre_verified"]) and not c["abs_observed"] for c in corrections),
+            "abs_observed": len(observed),
+            "verified_write_operations": sum(r["action"] == "apply" and r["state"] == "verified" for r in journals),
+            "calibre_verified_waiting_abs": sum(bool(c["calibre_verified"]) and not c["abs_observed"]
+                                                and c["status"] == "verified_in_calibre" for c in corrections),
             "artwork_unresolved": sum(r["fields"]["cover"]["disposition"] != "Pass" for r in report),
             "category_problems": sum(d.get("reason_code") == "category_problem" for d in fields),
             "unresolved_journals": [r["id"] for r in store.unresolved(plan["server"])],
