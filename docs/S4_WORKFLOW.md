@@ -60,6 +60,10 @@ selected targets must still match the regenerated plan before any local stage co
 Partial/unavailable provider attempts and contradictory recording identities cannot
 produce grouped recording-backed targets. Failed searches retain compatible earlier
 evidence; they do not fabricate a different value or silently erase captured evidence.
+Unresolved journals affect write availability only: recording-backed proposals keep
+their evidence strength and grouped local staging eligibility. The proposal view
+shows the History recovery requirement separately; existing write gates still refuse
+any mutation until recovery is resolved by the owner.
 
 Write previews bind exact finding IDs, approval timestamps, full managed before values,
 protected metadata, effective captured evidence, decisions and targets. Empty explicit
@@ -104,6 +108,12 @@ For ebooks, record a desired correction, edit it in native Calibre, and mark it 
 as a reminder. **Validate Calibre Changes** lists the configured catalog read-only;
 the library context, numeric ID and unique UUID must remain compatible. A reported
 edit is not validation. Fresh catalogs can reopen formerly verified targets. A
+catalog can reassess a verified correction only for its own source library and a
+compatible existing ABS/library/ID/UUID binding. Unscoped or identity-incomplete
+catalogs provide no contrary observation; unrelated libraries retain their cached
+comparisons and verified corrections. An authoritative removal, replacement UUID
+or material change reopens the corresponding correction without transferring bindings.
+A missing optional field does not establish a change. A
 catalog discrepancy without an accepted validated correction says to review authority
 or sync, rather than asserting that Calibre must already be correct.
 
@@ -166,6 +176,10 @@ native partial edits, changed covers/categories, Calibre UUID replacement and AB
 Existing transport, single-item, rollback, concurrency and recovery suites remain.
 The final delivery records actual pytest, Ruff, dependency, launcher and CI results.
 Final local Windows/Python 3.13.14 full run: **400 passed, 4 skipped in 112.76 s**.
+The targeted proposal-eligibility/Calibre-scope finalization subsequently passed
+**416 tests, 4 skipped in 139.07 s**. Its 750-book demonstration retained the same
+35 proposals / 30 grouped targets; report queries stayed at 13 (0.761 s report,
+1.115 s rerender in the existing benchmark; no material regression observed).
 Ruff across the repository, `pip check`, `start.ps1 -Check` and `git diff --check`
 passed. GitHub Actions is a separate check, recorded on the delivery PR.
 The independent visual review scored its recapture coverage issues resolved after

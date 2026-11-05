@@ -54,7 +54,7 @@ def library_plan(store, audit_id, report=None):
                 # Conflicting/ambiguous recording evidence cannot be upgraded by result order.
                 strong = strong and not details.get("evidence_issue") and (
                     len(options) == 1 or all("asin" in p["signals"] for _, p in options))
-                strong = strong and not blocked and all(l.get("state") == "ok" for l in item["lookups"])
+                strong = strong and all(l.get("state") == "ok" for l in item["lookups"])
                 strong = strong and not any(not m["rejected"] and m["contradictions"]
                                             and {"asin", "isbn"} & set(m["signals"]) for m in item["matches"])
                 if field == "series":

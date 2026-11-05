@@ -113,14 +113,38 @@ def import_catalog(store, audit_id, text, library=None, associations=None):
         with store.connect() as db:
             db.executemany("INSERT OR REPLACE INTO calibre_bindings VALUES(?,?,?,?,?,?,?)",
                            [b for b in bindings if b[2] in result])
-            db.execute("INSERT OR REPLACE INTO calibre_catalogs VALUES(?,?)", (audit_id, compact(result)))
+            previous = db.execute("SELECT data FROM calibre_catalogs WHERE audit_id=?", (audit_id,)).fetchone()
+            retained = {iid: entry for iid, entry in json.loads(previous[0] if previous else "{}").items()
+                        if not library or existing.get(iid, {}).get("calibre_library") != library}
+            db.execute("INSERT OR REPLACE INTO calibre_catalogs VALUES(?,?)", (audit_id, compact({**retained, **result})))
             db.execute("INSERT INTO calibre_catalog_history(audit_id,imported,data) VALUES(?,?,?)", (audit_id, captured, compact(catalog)))
             audit = store.audit(audit_id)
             books = {book.id: book for book in store.books(audit_id)}
+            records_by_id = {r["id"]: r for r in catalog}
+            unique_uuids = {r.get("uuid") for r in catalog if isinstance(r.get("uuid"), str) and r["uuid"].strip()}
             # Historical timestamps remain evidence, but a later incompatible catalog reopens review.
             for prior in db.execute("SELECT * FROM corrections WHERE server=? AND library=? AND calibre_verified IS NOT NULL AND status NOT IN ('discarded','needs_review','identity_ambiguous')",
                                     (audit["server"], audit["library"])).fetchall():
+                book = books.get(prior["item_id"])
+                bound = existing.get(prior["item_id"])
+                if (not library or library != prior["calibre_library"] or not book
+                        or identity(book, prior["field"]) != prior["identity_digest"]
+                        or not bound or bound["identity_digest"] != identity(book)
+                        or bound["calibre_library"] != library or bound["calibre_id"] != prior["calibre_id"]
+                        or bound["calibre_uuid"] != prior["calibre_uuid"]):
+                    continue  # No authoritative observation of this correction's existing binding.
+                record = records_by_id.get(prior["calibre_id"])
+                if record is None:
+                    if len(unique_uuids) != len(catalog):
+                        continue  # An identity-incomplete export cannot establish removal.
+                elif (not isinstance(record.get("uuid"), str) or not record["uuid"].strip()
+                      or sum(r.get("uuid") == record["uuid"] for r in catalog) != 1):
+                    continue
+                elif record["uuid"] == prior["calibre_uuid"] and not {"title", "authors"} <= record.keys():
+                    continue  # Missing work fields are not a material change.
                 fresh = result.get(prior["item_id"])
+                if fresh and prior["field"] not in fresh["values"]:
+                    continue  # An omitted optional field supplies no contrary observation.
                 if not (fresh and library == prior["calibre_library"] and fresh["id"] == prior["calibre_id"]
                         and fresh["raw"].get("uuid") == prior["calibre_uuid"]
                         and fresh["values"].get(prior["field"]) == json.loads(prior["proposed"])):

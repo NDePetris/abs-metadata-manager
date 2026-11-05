@@ -11,6 +11,8 @@ from .verification_ui import display
 def plan_controls(store, audit, report):
     plan = library_plan(store, audit["id"], report)
     with st.expander("Library correction proposals"):
+        if plan["writes_blocked"]:
+            st.warning("Writes are blocked: reconcile unresolved operations in History before applying changes. Evidence-backed local review and staging remain available.")
         st.write(" · ".join(f"{k}: {v}" for k, v in plan["counts"].items()))
         st.caption("Every book is counted once. Categories describe the next action; books may also have artwork or evidence gaps.")
         cols = st.columns(3)
