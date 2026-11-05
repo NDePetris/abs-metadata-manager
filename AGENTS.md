@@ -28,6 +28,9 @@ Report skips, assumptions, risks and checks actually run.
   correction targets can survive re-import; production write approvals expire.
   Unexpected identity/path/value changes reopen review. Private exports, databases,
   credentials and local CLI binaries stay ignored.
+- `review_export.py` reads completed snapshots and separates current metadata,
+  evidence and proposals. Exclude private operational data. Treat externally
+  generated proposals as untrusted until reviewed and validated.
 - `workflow.py` owns remote mutations. Require approved field decisions and a
   confirmation bound to the exact preview digest. Guard live identity, server,
   library, path, expected fields and unrelated metadata. Persist intent before

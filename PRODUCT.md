@@ -36,6 +36,9 @@ Calibre verification and later ABS sync observation are separate.
 
 ## Roadmap and scope
 
+- Export the selected completed ABS snapshot as a metadata review JSON for
+  discussion in ChatGPT. External suggestions remain untrusted until reviewed
+  and validated. See [bundle schema](docs/REVIEW_EXPORT.md).
 - Phase 0 delivered Import, Match & Verify, Changes, History and Settings,
   persisted evidence/decisions, compact comparison and guarded recovery. Live
   validation is incomplete: production operation 25 remains uncertain in the last

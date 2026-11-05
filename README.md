@@ -35,6 +35,15 @@ native ABS/Calibre. See [S3 results, measurements and limitations](docs/S3_REVIE
 
 File metadata and folder verification display **Not checked** unless reliable evidence exists. Missing file inspection is not itself an outstanding correction. ABS updates never establish file-embedded correctness.
 
+### Export for ChatGPT review
+
+Select your library in the sidebar and open **Import**. Check the snapshot
+date and book count, then click **Export metadata for ChatGPT** and
+**Download metadata review JSON**. This uses the existing completed snapshot
+without refreshing ABS or searching providers. Review the file for private
+descriptions or custom metadata before uploading. Treat ChatGPT suggestions as
+untrusted until reviewed and validated. See the [bundle schema](docs/REVIEW_EXPORT.md).
+
 ## Existing local database
 
 Stop the old app and follow [Backup, restore and uncertain writes](#backup-restore-and-uncertain-writes) for `data/metadata.sqlite3` (or `ABS_MM_DB`). Start this version with the same database path. Schema changes are additive; snapshots, generic annotations, accepted decisions, corrections, and recovery journals remain. Do not delete the database to bypass recovery. Generic legacy annotations and proposals never become human acceptance automatically.

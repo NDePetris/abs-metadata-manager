@@ -11,6 +11,7 @@ from abs_manager.changes_ui import changes_view
 from abs_manager.config import ROOT, Settings, defaults
 from abs_manager.locking import BusyError, operation_lock
 from abs_manager.models import digest
+from abs_manager.review_export import export_review_bundle
 from abs_manager.sample import sample_audit
 from abs_manager.store import Store
 from abs_manager.verification_ui import discover_providers, verification_view
@@ -183,6 +184,23 @@ def library_view(store):
     else:
         st.info("Connect in Settings, then use Library in the sidebar.")
     audit = active_inventory(store)
+    if audit:
+        st.caption(f"Metadata export · {audit['name']} · snapshot #{audit['id']} · "
+                   f"{audit['finished'][:16].replace('T', ' ')} UTC · {audit['books']} books")
+        st.caption("The JSON includes book metadata, saved evidence and proposed corrections. "
+                   "Review descriptions and custom fields for private information before uploading it to ChatGPT.")
+        export_key = (store.path, audit["server"], audit["library"], audit["id"])
+        if st.button("Export metadata for ChatGPT"):
+            st.session_state.pop("review_bundle", None)
+            st.session_state["review_bundle"] = (export_key, export_review_bundle(store, audit["id"]))
+        if (bundle := st.session_state.get("review_bundle")) and bundle[0] == export_key:
+            st.download_button("Download metadata review JSON", bundle[1],
+                               file_name=f"abs-metadata-review-{audit['id']}.json", mime="application/json",
+                               on_click="ignore")
+        else:
+            st.session_state.pop("review_bundle", None)
+    else:
+        st.session_state.pop("review_bundle", None)
     attempt = store.latest(adapter.server, library["id"]) if adapter and library else None
     if attempt and attempt["status"] != "complete":
         audit = attempt

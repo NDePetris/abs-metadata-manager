@@ -9,6 +9,7 @@ __pycache__/
 .test-tmp*/
 .pytest-tmp*/
 tests/fixtures/private/
+abs-metadata-review-*.json
 .impeccable/review/
 .impeccable/cache/
 *.log

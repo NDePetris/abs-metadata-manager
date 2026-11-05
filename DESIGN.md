@@ -10,6 +10,10 @@ The collapsed sidebar contains the single global Library selector, Import,
 Match & Verify, Changes, History and Settings, plus connection status. Normal
 pages use the latest completed inventory; historical snapshots are advanced tools.
 
+Import shows **Export metadata for ChatGPT** beside the completed snapshot name,
+date and book count. An explicit click prepares a local JSON download, including
+when a newer import is incomplete.
+
 Match & Verify starts with quality counts and a searchable exception selector,
 ordered by disposition and essential defects, with quality/field/reason filters.
 Historical manual acceptance is labeled separately. All books includes passing books
