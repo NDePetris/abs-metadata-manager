@@ -207,6 +207,53 @@ def confirmation(plan: dict, action="APPLY") -> str:
     return f"{action} {plan['digest'][:12]}"
 
 
+def observe_selected(store, adapter, audit_id, selected):
+    """Bounded read-only refresh; untouched books retain their old capture provenance.
+
+    A new snapshot expires write approvals and reuses import reconciliation. All
+    requested reads and identities must validate before replacing the current view.
+    """
+    from .store import now
+    with operation_lock(store.path):
+        audit = store.audit(audit_id)
+        if (not selected or len(selected) > 25 or len(selected) != len(set(selected))
+                or audit["status"] != "complete" or audit["read_only"]
+                or store.latest(audit["server"], audit["library"])["id"] != audit_id):
+            raise SafetyError("Select 1â€“25 distinct books from the latest complete live snapshot.")
+        if adapter.server != audit["server"] or store.unresolved(audit["server"]):
+            raise SafetyError("Connect to the original server and reconcile unresolved History first.")
+        library = next((lib for lib in adapter.libraries() if lib["id"] == audit["library"]), None)
+        if library is None or (audit["library_identity"] and library_identity(library) != json.loads(audit["library_identity"])):
+            raise SafetyError("Library identity changed. Run a full import.")
+        books = {b.id: b for b in store.books(audit_id)}
+        observed = {}
+        for iid in selected:
+            if iid not in books:
+                raise SafetyError("Selected book is not in this snapshot.")
+            live = Book(adapter.item(iid))
+            if live.identity != books[iid].identity or live.raw.get("isMissing") or live.raw.get("isInvalid"):
+                raise SafetyError("Book moved, changed identity or became unavailable. Run a full import.")
+            observed[iid] = live
+        fresh_id = store.start_audit(audit["server"], audit["library"], audit["name"],
+                                     library_identity=library_identity(library))
+        try:
+            for iid, original in books.items():
+                store.add_book(fresh_id, observed.get(iid, original))
+            # Catalog is historic authority evidence, not a new Calibre observation.
+            with store.connect() as db:
+                db.execute("INSERT INTO calibre_catalogs SELECT ?,data FROM calibre_catalogs WHERE audit_id=?",
+                           (fresh_id, audit_id))
+                for iid in books:
+                    db.execute("INSERT INTO verification_annotations VALUES(?,?,?,?)",
+                               (fresh_id, iid, "observation", json.dumps({"captured": now() if iid in observed else None,
+                                "source_audit": audit_id, "fresh_abs": iid in observed})))
+            store.finish_audit(fresh_id)
+        except BaseException:
+            store.finish_audit(fresh_id, "interrupted", "Read-only refresh interrupted; no remote update submitted.")
+            raise
+        return fresh_id
+
+
 def guard(book: Book, identity: dict, values: dict):
     if book.identity != identity:
         raise SafetyError("Live identity, library, or path changed. Run a fresh audit; no ID migration is allowed.")

@@ -116,6 +116,14 @@ def import_catalog(store, audit_id, text, library=None, associations=None):
             db.execute("INSERT INTO calibre_catalog_history(audit_id,imported,data) VALUES(?,?,?)", (audit_id, captured, compact(catalog)))
             audit = store.audit(audit_id)
             books = {book.id: book for book in store.books(audit_id)}
+            # Historical timestamps remain evidence, but a later incompatible catalog reopens review.
+            for prior in db.execute("SELECT * FROM corrections WHERE server=? AND library=? AND calibre_verified IS NOT NULL AND status NOT IN ('discarded','needs_review','identity_ambiguous')",
+                                    (audit["server"], audit["library"])).fetchall():
+                fresh = result.get(prior["item_id"])
+                if not (fresh and library == prior["calibre_library"] and fresh["id"] == prior["calibre_id"]
+                        and fresh["raw"].get("uuid") == prior["calibre_uuid"]
+                        and fresh["values"].get(prior["field"]) == json.loads(prior["proposed"])):
+                    db.execute("UPDATE corrections SET status='needs_review',updated=? WHERE id=?", (captured, prior["id"]))
             rows = db.execute("SELECT * FROM corrections WHERE server=? AND library=? AND status IN ('pending','edited_in_calibre')", (audit["server"], audit["library"])).fetchall()
             for correction in rows:
                 match = result.get(correction["item_id"])
@@ -132,6 +140,30 @@ def import_catalog(store, audit_id, text, library=None, associations=None):
                     db.execute("UPDATE corrections SET status='verified_in_calibre', calibre_id=?, calibre_verified=?, updated=? WHERE id=?",
                                (match["id"], captured, captured, correction["id"]))
     return len(result)
+
+
+def reconciliation_states(store, audit_id, report=None):
+    """Describe authority and sync independently; a catalog mismatch is not proof Calibre is wrong."""
+    report = store.verification_report(audit_id) if report is None else report
+    corrections = store.corrections(audit_id)
+    result = []
+    for item in report:
+        if item["type"] != "ebook":
+            continue
+        rows = [c for c in corrections if c["item_id"] == item["item_id"] and c["status"] != "discarded"]
+        linked = not item["calibre_limitation"]
+        differences = [f for f, d in item["fields"].items() if any(
+            p["source"] == "Calibre catalog" for p in d["provenance"]) and d["status"] == "Conflict"]
+        state = ("Matching unavailable or ambiguous" if not linked else
+                 "External edit reported; revalidation required" if any(c["status"] == "edited_in_calibre" for c in rows) else
+                 "Calibre correction needs review" if any(c["status"] in ("pending", "needs_review", "identity_ambiguous") for c in rows) else
+                 "Calibre verified; ABS synchronization pending" if differences and any(c["status"] == "verified_in_calibre" for c in rows) else
+                 "Calibre differs; review authority or ABS synchronization" if differences else "Calibre and ABS agree")
+        result.append({"item_id": item["item_id"], "title": item["fields"]["title"]["value"],
+                       "state": state, "different_fields": differences,
+                       "authority": "Calibre", "abs_observation": item.get("abs_observation"),
+                       "limitation": "Catalog comparison only; covers/custom columns unavailable. A discrepancy requires source review before assuming Calibre is correct."})
+    return result
 
 
 def validate_local(store, audit_id, executable, library):

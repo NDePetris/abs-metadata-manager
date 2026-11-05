@@ -2,10 +2,10 @@
 
 import streamlit as st
 
-from .calibre import import_catalog, validate_local
+from .calibre import import_catalog, reconciliation_states, validate_local
 from .models import review_fields
 from .verification_ui import display, editor
-from .workflow import Workflow, confirmation, preview
+from .workflow import Workflow, confirmation, observe_selected, preview
 
 
 def changes_view(store, audit, show_plan, progress):
@@ -27,6 +27,17 @@ def changes_view(store, audit, show_plan, progress):
         st.dataframe(overview, hide_index=True, width="stretch")
         st.caption("Select a library in the sidebar to approve and process its changes.")
     aid = audit["id"]
+    with st.expander("Observe external changes (read-only)"):
+        inventory = {b.id: b for b in store.books(aid)}
+        observed = st.multiselect("Books to refresh (up to 25)", list(inventory),
+                                  format_func=lambda iid: inventory[iid].values["title"])
+        st.caption("Only selected books are reread. Others retain their older values. Write approvals expire. After native artwork changes, retrieve and inspect covers again in Match & Verify.")
+        adapter = st.session_state.get("adapter")
+        if st.button("Observe selected ABS values", disabled=not observed or adapter is None):
+            st.session_state["snapshot_choice"] = observe_selected(store, adapter, aid, observed)
+            st.rerun()
+        st.dataframe(reconciliation_states(store, aid), hide_index=True, width="stretch")
+        st.caption("Correct ebook metadata in Calibre, then Validate Calibre Changes. Use native ABS scan/refresh as appropriate for your library settings; observe ABS separately. A Calibre edit does not prove ABS synchronization.")
     rows = [r for r in store.corrections(aid) if r["status"] not in ("discarded", "observed_in_abs")]
     findings = [f for f in store.findings(aid) if f["actionable"] and f["status"] in ("pending", "approved")
                 and f["kind"] in ("manual", "external", "confirmed_target")]

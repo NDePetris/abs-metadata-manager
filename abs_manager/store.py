@@ -383,6 +383,8 @@ class Store(PersistentState):
             report["human_decisions"] = self.field_decisions(audit_id, book.id, _scope=book_scope,
                                                              _rows=field_rows[book.id], _corrections=corrections)
             report["candidate_decisions"] = decisions
+            report["abs_observation"] = reviews.get("observation", {"source_audit": audit_id, "fresh_abs": True,
+                                                                    "captured": audit["finished"]})
             report["manual_edition"] = (choice if choice and choice["decision"] == "absent"
                                         and current_choice and current_choice["valid"]
                                         and current_choice["decision"] == "absent" else None)
