@@ -5,7 +5,7 @@ import re
 from collections import defaultdict
 
 from .locking import operation_lock
-from .models import FIELDS, compact, digest
+from .models import FIELDS, WRITE_FIELDS, compact, digest
 from .persistent_state import identity
 from .store import now
 
@@ -232,7 +232,7 @@ def _export(store, audit_id, exported_at):
             "book_count": len(books),
         },
         "authority": {
-            "audiobook": {"current": "Audiobookshelf", "guarded_write_fields": [] if audit["read_only"] else list(FIELDS),
+            "audiobook": {"current": "Audiobookshelf", "guarded_write_fields": [] if audit["read_only"] else list(WRITE_FIELDS),
                           "other_fields": "native_or_manual"},
             "ebook": {"current": "Audiobookshelf", "corrections": "Calibre", "guarded_write_fields": [],
                       "other_fields": "manual_in_calibre"},

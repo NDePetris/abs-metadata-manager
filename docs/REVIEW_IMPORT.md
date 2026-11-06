@@ -7,6 +7,9 @@
    **Recommendation details** shows the rationale and evidence. For example,
    choose **genres** to inspect all proposed genre sets together.
 3. Select eligible fields individually or use **Select eligible rows in view**.
+   Review each editorial description in **Recommendation details** and select
+   it individually in **Fields selected for staging**. Confirm any held narrator
+   credit against the actual recording before selecting it.
    You can check the selection against live ABS for up to ten books per request.
    This is read-only and leaves the saved snapshot intact.
 4. Click **Stage selected changes locally**. Return to the existing Changes
@@ -15,13 +18,12 @@
    checks, journal, readback and rollback. Unresolved recovery still blocks
    remote execution. Local review and staging are available during recovery
    when the latest live snapshot is complete and the selected fields are clear.
-5. Use **Download native/manual review checklist** for genres, descriptions and
-   publication years, shown as ABS **publishedYear**. Editorial descriptions
-   remain marked for review. The checklist includes outstanding entries and
-   flags conflicts to resolve before editing. Save the original upload privately
-   and upload it again in a new browser session. After native edits, refresh or
-   observe the affected books and re-upload as needed. Exact desired values
-   observed in the saved inventory leave the outstanding list.
+5. Select up to ten audiobooks in Changes, click **Approve selected fields for
+   ABS preview**, and inspect **Exact CLI metadata payload**. Enter the displayed
+   confirmation phrase, check the approval box and click **Apply confirmed
+   changes**. Repeat for the next batch. Refresh the library after application
+   to update the saved inventory. Save the original upload privately and upload
+   it again in a new browser session as needed.
 
 If a newer import was interrupted, finish a live import to enable staging.
 The importer still uses the original saved snapshot to verify the proposal. It
@@ -69,7 +71,10 @@ Authors and narrators use complete ordered arrays of nonempty names. Series
 uses a complete array of unique names with decimal sequence strings or null.
 Dropping existing series memberships is flagged for manual review. Author
 changes with saved role information require manual review. Descriptions retain
-their full text. Publication-year targets are four-digit strings or integers.
+their full text in the payload. ABS sanitizes description HTML. If ABS returns
+different text after a write, the operation remains uncertain and requires
+reconciliation. Publication-year targets are four-digit strings or integers
+and are sent as strings in ABS `publishedYear`.
 Ebook recommendations are manual Calibre guidance.
 
 ### Synthetic example
@@ -102,12 +107,10 @@ snapshot.
 
 ## Audit #6 pilot
 
-The pilot includes 206 new recommendations across 108 of 110 books. Of the 37
-guarded-writer fields, 34 are eligible for owner selection once snapshot checks
-pass. Each of the other three narrator changes requires explicit confirmation
-of its recording before staging. Confidence does not lift the hold.
-
-The 108 genre sets, 55 editorial descriptions and six publication years remain
-native recommendations. The six previously staged corrections are listed
-separately and never duplicated by the import. Uploading or inspecting this
-document does not stage, approve or execute any change.
+The pilot includes 206 new recommendations across 108 of 110 books. Once
+snapshot checks pass, 203 can be selected for the guarded workflow, including
+108 genre sets, 55 individually selected editorial descriptions and six
+publication years. Three narrator changes require explicit recording
+confirmation. The six previously staged corrections are listed separately and
+excluded from staging. Uploading or inspecting the document leaves all
+corrections and approvals as they were.

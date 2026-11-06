@@ -9,6 +9,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 FIELDS = ("title", "subtitle", "authors", "narrators", "series")
+IMPORTED_FIELDS = ("description", "genres", "publishedYear")
+WRITE_FIELDS = FIELDS + IMPORTED_FIELDS
 
 
 def target_observed(field, desired, observed):
@@ -25,6 +27,10 @@ def result_matches(expected, observed, changes):
 def review_fields(is_audio: bool) -> tuple[str, ...]:
     """The same editable/confirmable fields in the UI and local decision store."""
     return FIELDS if is_audio else ("title", "subtitle", "authors", "series", "identifiers")
+
+
+def correction_fields(is_audio: bool) -> tuple[str, ...]:
+    return WRITE_FIELDS if is_audio else review_fields(False)
 
 
 def compact(value: Any) -> str:
@@ -56,7 +62,7 @@ def person_key(value: str) -> str:
 
 
 def validate_target(field: str, value: Any) -> Any:
-    if field not in FIELDS:
+    if field not in WRITE_FIELDS:
         raise ValueError("This field is read-only.")
     if field in ("title", "subtitle"):
         if not isinstance(value, str) or (field == "title" and not value.strip()):
@@ -77,6 +83,17 @@ def validate_target(field: str, value: Any) -> Any:
             number = entry["sequence"]
             if number is not None and (not isinstance(number, str) or sequence(number) is None):
                 raise ValueError("Sequence must be a nonnegative decimal string or null.")
+    elif field == "description" and (not isinstance(value, str) or not value):
+        raise ValueError("Description must be nonempty text. ABS stores empty descriptions as null.")
+    elif field == "genres":
+        if not isinstance(value, list) or not all(isinstance(x, str) and x.strip() for x in value):
+            raise ValueError("Genres must be a JSON list of nonempty names.")
+        if len(set(value)) != len(value):
+            raise ValueError("Duplicate genres are not allowed.")
+    elif field == "publishedYear":
+        if type(value) not in (str, int) or not re.fullmatch(r"[0-9]{4}", str(value)):
+            raise ValueError("Publication year must contain exactly four digits.")
+        return str(value)
     return copy.deepcopy(value)
 
 
@@ -129,12 +146,21 @@ class Book:
         return bool(media.get("audioFiles") or media.get("tracks") or media.get("numAudioFiles", 0)
                     or media.get("duration", 0))
 
-    def protected(self) -> dict:
+    def write_values(self, fields) -> dict:
+        """Keep the original snapshot digest and include new fields only when targeted."""
+        return {**self.values, **{key: self.metadata.get(key) for key in IMPORTED_FIELDS if key in fields}}
+
+    def protected(self, fields=()) -> dict:
         """Stable unrelated metadata/media. Computed display names may follow an approved edit."""
         media = copy.deepcopy(self.raw["media"])
         metadata = media.pop("metadata")
         for key in (*FIELDS, "titleIgnorePrefix", "authorName", "authorNameLF", "narratorName", "seriesName"):
             metadata.pop(key, None)
+        for key in IMPORTED_FIELDS:
+            if key in fields:
+                metadata.pop(key, None)
+        if "description" in fields:
+            metadata.pop("descriptionPlain", None)
         media.pop("id", None)
         media.pop("libraryItemId", None)
         return {"metadata": metadata, "media": media}
@@ -143,8 +169,8 @@ class Book:
 def payload(changes: dict, restoring=False) -> dict:
     if not changes:
         raise ValueError("Empty update.")
-    result = {field: (None if restoring and field in ("title", "subtitle") and value is None
-                      else validate_target(field, value)) for field, value in changes.items()}
+    result = {field: (None if restoring and field in ("title", "subtitle", "description", "publishedYear")
+                      and value is None else validate_target(field, value)) for field, value in changes.items()}
     if "authors" in result:
         result["authors"] = [{"name": name} for name in result["authors"]]
     return {"metadata": result}

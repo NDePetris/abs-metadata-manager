@@ -11,11 +11,13 @@ from .workflow import MAX_APPLY_BATCH, SafetyError, guard, library_identity
 
 DOCUMENT_TYPE = "audiobookshelf_metadata_review_recommendations"
 DOCUMENT_VERSION = "1.0-review-proposal"
-NATIVE_FIELDS = {"genres": "genres", "description": "description", "publication_year": "publishedYear"}
+ABS_FIELDS = {"publication_year": "publishedYear"}
+EXTRA_REVIEW_FIELDS = ("genres", "description", "publication_year")
 STATUSES = ("approved_recommendation", "editorial_review", "requires_recording_verification")
 EXISTING = "already_staged_in_original_export_not_repeated"
 READY = "Ready to stage"
 HELD = "Recording confirmation required"
+EDITORIAL = "Editorial review outstanding"
 ALREADY_APPLIED = "Already observed in saved snapshot"
 ALREADY_STAGED = "Already staged"
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -125,7 +127,8 @@ def _validate_values(field, expected, desired, policy):
         if policy["must_include_broader_genre"]:
             _require(all(set(policy["genre_parent_rules"].get(genre, ())) <= genres for genre in genres))
     elif field == "description":
-        _require((expected is None or isinstance(expected, str)) and isinstance(desired, str))
+        _require(expected is None or isinstance(expected, str))
+        validate_target(field, desired)
     else:
         _require(expected is None or type(expected) in (str, int))
         _require(type(desired) in (str, int) and bool(re.fullmatch(r"[0-9]{4}", str(desired))))
@@ -134,11 +137,13 @@ def _validate_values(field, expected, desired, policy):
 def _proposal(row, policy, existing):
     _require(isinstance(row, dict))
     field, status = row["field"], row["status"]
-    _require(field in (*FIELDS, *NATIVE_FIELDS))
+    _require(field in (*FIELDS, *EXTRA_REVIEW_FIELDS))
     _require(_text(row["item_id"]) and _hash(row["identity_digest"]) and _hash(row["managed_values_digest"]))
     expected = row["expected_original_value"]
     desired = row["already_staged_desired_value" if existing else "complete_desired_value"]
     _validate_values(field, expected, desired, policy)
+    if field == "publication_year":
+        desired = validate_target("publishedYear", desired)
     args = (row["item_id"], field, expected, desired, row["identity_digest"], row["managed_values_digest"], status)
     if existing:
         _require(status == EXISTING)
@@ -192,7 +197,7 @@ def parse_review(data: bytes) -> ReviewDocument:
 
 
 def _value(book, field):
-    return book.values[field] if field in FIELDS else book.metadata.get(NATIVE_FIELDS[field])
+    return book.write_values((ABS_FIELDS.get(field, field),))[ABS_FIELDS.get(field, field)]
 
 
 def _staged(store, source_id, active_id):
@@ -236,12 +241,12 @@ def _disposition(p, source, active, staged, may_stage, duplicate):
         return "Series membership would be removed"
     if p.field == "authors" and source.is_audio and any(a.get("role") or a.get("roles") for a in source.metadata["authors"]):
         return "Author roles require manual review"
-    if p.status == STATUSES[1]:
-        return "Editorial review outstanding"
-    if p.field not in FIELDS or not source.is_audio:
+    if not source.is_audio:
         return "Native edit outstanding"
     if not may_stage or active.raw.get("isMissing") or active.raw.get("isInvalid"):
         return "Snapshot or item unavailable for staging"
+    if p.status == STATUSES[1]:
+        return EDITORIAL
     return HELD if p.status == STATUSES[2] else READY
 
 
@@ -277,8 +282,9 @@ def review_rows(store, active_id, document):
         book = saved.get(p.item_id)
         label = current.get(p.item_id, book)
         capability = ("Calibre / manual" if (book and not book.is_audio) or p.media_type == "ebook"
-                      else "Guarded ABS" if p.field in FIELDS else "Native ABS")
-        state = _disposition(p, book, current.get(p.item_id), staged.get(p.key), may_stage,
+                      else "Guarded ABS")
+        state = _disposition(p, book, current.get(p.item_id),
+                             staged.get((p.item_id, ABS_FIELDS.get(p.field, p.field))), may_stage,
                              keys[p.key] > 1 or ids[p.id] > 1)
         rows.append(ReviewRow(p, ", ".join(label.values["authors"]) if label else "",
                               (label.values["title"] or "") if label else "Unavailable book",
@@ -289,7 +295,7 @@ def review_rows(store, active_id, document):
 
 def _selected_rows(store, active_id, document, selected, confirmed):
     rows = {r.proposal.id: r for r in review_rows(store, active_id, document)
-            if r.disposition == READY or r.disposition == HELD and r.proposal.id in confirmed}
+            if r.disposition in (READY, EDITORIAL) or r.disposition == HELD and r.proposal.id in confirmed}
     if not selected or len(selected) != len(set(selected)) or not set(selected) <= rows.keys():
         raise ValueError("Selection is no longer eligible. Review the current dispositions.")
     return [rows[pid] for pid in selected]
@@ -306,7 +312,7 @@ def stage_review(store, active_id, document, selected, confirmed=()):
                                 "bundle_digest": document.source["content_digest"], "status": p.status,
                                 "recording_confirmed": row.disposition == HELD, "confidence": p.confidence,
                                 "rationale": p.rationale, "evidence": p.evidence})
-            store._confirm_targets(db, active_id, p.item_id, {p.field: p.desired}, evidence)
+            store._confirm_targets(db, active_id, p.item_id, {ABS_FIELDS.get(p.field, p.field): p.desired}, evidence)
     return len(rows)
 
 
@@ -336,5 +342,5 @@ def check_live(store, adapter, active_id, document, selected, confirmed=()):
             for p in proposals:
                 results[p.id] = ("Matches saved snapshot" if unchanged else
                                  "Desired value already present in ABS" if target_observed(
-                                     p.field, p.desired, live.values[p.field]) else "Live metadata mismatch")
+                                     p.field, p.desired, _value(live, p.field)) else "Live metadata mismatch")
         return results

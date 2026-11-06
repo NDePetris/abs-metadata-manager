@@ -6,7 +6,7 @@ from collections.abc import Callable
 from .adapter import Adapter, AdapterError, CliAdapter, InventoryChanged, inventory, membership
 from .diagnostics import event
 from .locking import operation_lock
-from .models import Book, digest, payload, result_matches, target_observed
+from .models import IMPORTED_FIELDS, Book, digest, payload, result_matches, target_observed
 from .store import Store
 
 
@@ -32,7 +32,7 @@ def operation_comparison(data, observed):
 
     before, after = data.get("before", {}), data.get("after", {})
     for field in sorted(set(before) | set(after)):
-        actual = book.values.get(field) if book else None
+        actual = book.write_values(before).get(field) if book else None
         equal = book is not None and (target_observed(field, after.get(field), actual)
                                      if field in data.get("changes", {}) else after.get(field) == actual)
         if field in data.get("changes", {}) or not equal:
@@ -60,7 +60,7 @@ def operation_comparison(data, observed):
 
     if book:
         differences("Identity", data.get("identity"), book.identity)
-        differences("Protected", data.get("protected"), book.protected())
+        differences("Protected", data.get("protected"), book.protected(before))
         if book.raw.get("isMissing") or book.raw.get("isInvalid") or not book.is_audio:
             rows.append({"Field": "Media validity", "Comparison": "Material difference"})
     return rows
@@ -187,19 +187,29 @@ def preview(store: Store, audit_id: int, selected=None) -> dict:
         book = store.book(audit_id, finding["item_id"])
         if not book.is_audio:
             raise SafetyError("Ebooks are read-only. Calibre remains authoritative.")
-        group = groups.setdefault(book.id, {"identity": book.identity, "before": book.values,
-                                            "protected": book.protected(), "changes": {}, "finding_ids": [],
+        group = groups.setdefault(book.id, {"identity": book.identity,
+                                            "changes": {}, "finding_ids": [],
                                             "approvals": {}})
         field = finding["field"]
         if field in group["changes"]:
             raise SafetyError("Multiple approved proposals for the same field. Reset one decision.")
-        if finding["current"] != book.values[field]:
+        if finding["current"] != book.write_values((field,)).get(field):
             raise SafetyError("Proposal source does not match its snapshot.")
         group["changes"][field] = finding["target"]
         group["finding_ids"].append(finding["id"])
         group["approvals"][str(finding["id"])] = finding["reviewed"]
-    for group in groups.values():
+    for iid, group in groups.items():
+        book = store.book(audit_id, iid)
+        group["before"] = book.write_values(group["changes"])
+        group["protected"] = book.protected(group["changes"])
         group["payload"] = payload(group["changes"])
+        restore = {field: group["before"][field] for field in IMPORTED_FIELDS if field in group["changes"]}
+        if restore:
+            try:
+                if payload(restore, restoring=True)["metadata"] != restore:
+                    raise ValueError("The original value would be converted on rollback.")
+            except ValueError as exc:
+                raise SafetyError("An original imported field cannot be restored through ABS. Review the saved value.") from exc
     if groups:
         evidence = {r["item_id"]: r for r in store.verification_report(audit_id)}
         for iid, group in groups.items():
@@ -279,7 +289,7 @@ def observe_selected(store, adapter, audit_id, selected):
 def guard(book: Book, identity: dict, values: dict):
     if book.identity != identity:
         raise SafetyError("Live identity, library, or path changed. Run a fresh audit; no ID migration is allowed.")
-    if book.values != values:
+    if book.write_values(values) != values:
         raise SafetyError("Live metadata differs from the expected source. Run a fresh audit.")
     if book.raw.get("isMissing") or book.raw.get("isInvalid") or not book.is_audio:
         raise SafetyError("Live item is missing, invalid, or not an audiobook.")
@@ -304,10 +314,11 @@ def batch_results(store, plan):
 
 def verify(book: Book, data: dict, values: dict, *, intended=False):
     expected = values
-    if intended and result_matches(values, book.values, data["changes"]):
-        expected = book.values
+    actual = book.write_values(values)
+    if intended and result_matches(values, actual, data["changes"]):
+        expected = actual
     guard(book, data["identity"], expected)
-    if book.protected() != data["protected"]:
+    if book.protected(values) != data["protected"]:
         raise SafetyError("Unrelated live metadata/media changed. Reconcile and inspect the book.")
 
 
@@ -346,7 +357,7 @@ class Workflow:
                         raise SafetyError("Selected targets or approvals changed during execution.")
                     live = Book(self.adapter.item(identity["id"]))
                     guard(live, identity, group["before"])
-                    if live.protected() != group["protected"]:
+                    if live.protected(group["changes"]) != group["protected"]:
                         raise SafetyError("Protected metadata changed since preview.")
                 except Exception as exc:
                     self.store.record(plan["server"], plan["library"], identity["id"], "apply",
@@ -355,8 +366,8 @@ class Workflow:
                                       "Live validation failed. No update submitted; run a fresh audit.")
                     self._expire_batch(plan)
                     raise SafetyError("Live validation failed. Batch stopped without updating this book.") from exc
-                after = {**live.values, **group["changes"]}
-                data = {**group, "after": after, "protected": live.protected(), "pre_update_raw": live.raw,
+                after = {**group["before"], **group["changes"]}
+                data = {**group, "after": after, "pre_update_raw": live.raw,
                         "audit_id": plan["audit_id"], "preview_digest": plan["digest"], "batch_plan": plan}
                 try:
                     operation_id = self._execute(plan["server"], plan["library"], "apply", data)
@@ -435,7 +446,7 @@ class Workflow:
         changes = {field: data["before"][field] for field in data["changes"]}
         result = {"server": row["server"], "library": row["library"], "parent": operation_id,
                   "identity": data["identity"],
-                  "before": Book(row["observed"]).values if row["observed"] else data["after"],
+                  "before": Book(row["observed"]).write_values(changes) if row["observed"] else data["after"],
                   "after": data["before"],
                   "changes": changes, "payload": payload(changes, restoring=True), "protected": data["protected"]}
         result["digest"] = digest(result)

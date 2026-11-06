@@ -62,7 +62,7 @@ Credentials remain in process memory while used and enter the CLI through its ch
 
 ## Safety and source authority
 
-Only audiobook title, subtitle, authors, narrators, and series are writable through `items update --id CURRENT_ID --stdin`. Explicit field approval, exact digest confirmation, live identity/path/value guards, unrelated-media verification, FULL-synchronous pre-send journals, sequential execution, and the workspace lock remain mandatory. Prepared/applied/uncertain entries block further writes pending reconciliation. No automatic write retries occur.
+Audiobook title, subtitle, authors, narrators, series, description, genres, and publication year are writable through `items update --id CURRENT_ID --stdin`. The last three are staged through [Import AI corrections](docs/REVIEW_IMPORT.md). Explicit field approval, exact digest confirmation, live identity/path/value guards, unrelated-media verification, FULL-synchronous pre-send journals, sequential execution, and the workspace lock remain mandatory. Prepared/applied/uncertain entries block further writes pending reconciliation. No automatic write retries occur.
 
 abs-cli 1.2.0 remains the validated writer. A configured abs-cli refresh token blocks writes because upstream authentication refresh can retry PATCH. This app never removes that token for you. Playback progress, covers, chapters, paths, and files are not written.
 

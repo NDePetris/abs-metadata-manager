@@ -12,6 +12,7 @@ from abs_manager.review_import import (
     ALREADY_STAGED,
     DOCUMENT_TYPE,
     DOCUMENT_VERSION,
+    EDITORIAL,
     EXISTING,
     HELD,
     READY,
@@ -107,13 +108,13 @@ def test_representative_pilot(pilot):
         "approved_recommendation": 148, "editorial_review": 55, "requires_recording_verification": 3, EXISTING: 6,
     }
     assert Counter((r.capability, r.disposition) for r in rows) == {
-        ("Guarded ABS", READY): 34, ("Guarded ABS", HELD): 3, ("Guarded ABS", ALREADY_STAGED): 6,
-        ("Native ABS", "Native edit outstanding"): 114, ("Native ABS", "Editorial review outstanding"): 55,
+        ("Guarded ABS", READY): 148, ("Guarded ABS", HELD): 3, ("Guarded ABS", ALREADY_STAGED): 6,
+        ("Guarded ABS", EDITORIAL): 55,
     }
     assert next(r for r in rows if r.proposal.field == "series").proposal.desired == [
         {"name": "Example series", "sequence": "2.50"}, {"name": "Other", "sequence": "0.5"},
     ]
-    assert all(r.disposition != READY for r in rows if r.proposal.field == "genres")
+    assert all(r.disposition == READY for r in rows if r.proposal.field == "genres")
 
 
 @pytest.fixture
@@ -195,13 +196,52 @@ def test_conflicts_do_not_overwrite_approval_and_holds_require_confirmation(sing
     assert [r.disposition for r in review_rows(store, aid, document)] == [
         "Conflicts with staged work", HELD, "Editorial review outstanding",
     ]
-    for p in doc["recommendations"]:
+    for p in doc["recommendations"][:2]:
         with pytest.raises(ValueError):
             stage_review(store, aid, document, [p["proposal_id"]])
     assert preview(store, aid) == before
     assert stage_review(store, aid, document, [hold["proposal_id"]], [hold["proposal_id"]]) == 1
     assert preview(store, aid)["books"][0]["finding_ids"] == [fid]
     assert not api.writes
+
+
+def test_expanded_fields_use_guarded_apply_and_rollback(single):
+    store, api, aid, doc = single
+    book = store.books(aid)[0]
+    target = {"description": "Édition française\n\n第二段落", "genres": ["Fantasy", "Romance", "Fantasy Romance"],
+              "publishedYear": "2026"}
+    doc["recommendations"] = [
+        proposal(book, "description", target["description"], "editorial_review"),
+        proposal(book, "genres", target["genres"]),
+        proposal(book, "publication_year", 2026),
+    ]
+    document = parse_review(encode(doc))
+    ids = [p.id for p in document.proposals]
+    assert set(check_live(store, api, aid, document, ids).values()) == {"Matches saved snapshot"}
+    assert stage_review(store, aid, document, ids) == 3
+    assert all(r.disposition == ALREADY_STAGED for r in review_rows(store, aid, document))
+    assert preview(store, aid)["books"] == []
+    staged = [f["id"] for f in store.findings(aid) if f["kind"] == "confirmed_target"]
+    store.review(staged, "approved")
+    plan = preview(store, aid, staged)
+    assert plan["books"][0]["payload"] == {"metadata": target}
+    flow = Workflow(store, api)
+    with pytest.raises(SafetyError, match="exact confirmation"):
+        flow.apply(plan, "APPLY incorrect")
+    assert not api.writes
+    api.items[book.id]["media"]["metadata"]["descriptionPlain"] = book.metadata["description"]
+    api.mutate_after = lambda item: item["media"]["metadata"].update(
+        descriptionPlain=item["media"]["metadata"]["description"])
+    oid, = flow.apply(plan, confirmation(plan))
+    assert store.operation(oid)["state"] == "verified"
+    live = Book(api.item(book.id))
+    assert live.protected(target) == book.protected(target)
+    refreshed = save(store, [live.raw])
+    assert all(r.disposition == ALREADY_APPLIED for r in review_rows(store, refreshed, document))
+    rollback = flow.rollback_preview(oid)
+    rid = flow.rollback(rollback, confirmation(rollback, "ROLLBACK"))
+    assert store.operation(rid)["state"] == "verified"
+    assert Book(api.item(book.id)).write_values(target) == book.write_values(target)
 
 
 def test_staging_rolls_back_and_unrelated_journal_stays_blocking(single, monkeypatch):
@@ -295,6 +335,7 @@ def test_upload_filter_select_and_stage_in_streamlit(single, tmp_path):
     book = store.books(aid)[0]
     doc["recommendations"] += [
         proposal(book, "genres", ["Fantasy", "Romance", "Fantasy Romance"]),
+        proposal(book, "description", "Édition\n\nSecond paragraph", "editorial_review"),
         proposal(book, "narrators", ["New voice"], "requires_recording_verification"),
     ]
     script = tmp_path / "upload_app.py"
@@ -312,8 +353,10 @@ import_corrections(store, store.audit({aid}))
     at.file_uploader[0].upload("synthetic.json", encode(doc), "application/json").run()
     assert not at.exception
     assert store.corrections(aid) == []
-    assert len(widget(at.multiselect, "Fields selected for staging").options) == 1
+    assert len(widget(at.multiselect, "Fields selected for staging").options) == 3
     widget(at.selectbox, "Field").select("genres").run()
+    assert not widget(at.button, "Select eligible rows in view").disabled
+    widget(at.selectbox, "Field").select("description").run()
     assert widget(at.button, "Select eligible rows in view").disabled
     widget(at.selectbox, "Field").select("title").run()
     widget(at.button, "Select eligible rows in view").click().run()

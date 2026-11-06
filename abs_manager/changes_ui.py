@@ -3,7 +3,7 @@
 import streamlit as st
 
 from .calibre import import_catalog, reconciliation_states, validate_local
-from .models import review_fields
+from .models import correction_fields, review_fields
 from .review_import_ui import import_corrections
 from .verification_ui import display, editor
 from .workflow import MAX_APPLY_BATCH, Workflow, batch_results, confirmation, observe_selected, preview
@@ -52,8 +52,8 @@ def changes_view(store, audit, show_plan, progress):
     grouped = st.multiselect("Select staged fields together", [f["id"] for f in eligible],
                              format_func=lambda fid: next(books[f["item_id"]].values["title"] + " · " + f["field"] + " · " + f["item_id"]
                                                           for f in eligible if f["id"] == fid))
-    rows = [r for r in rows if r["item_id"] not in books or r["field"] in review_fields(books[r["item_id"]].is_audio)]
-    findings = [f for f in findings if f["item_id"] in books and f["field"] in review_fields(books[f["item_id"]].is_audio)]
+    rows = [r for r in rows if r["item_id"] not in books or r["field"] in correction_fields(books[r["item_id"]].is_audio)]
+    findings = [f for f in findings if f["item_id"] in books and f["field"] in correction_fields(books[f["item_id"]].is_audio)]
     selected = list(grouped)
     st.dataframe([{"Book": books[f["item_id"]].values["title"], "Field": f["field"],
                    "Current": display(f["current"]), "Target": display(f["target"]), "Status": f["status"]}
