@@ -4,6 +4,7 @@ import streamlit as st
 
 from .calibre import import_catalog, reconciliation_states, validate_local
 from .models import review_fields
+from .review_import_ui import import_corrections
 from .verification_ui import display, editor
 from .workflow import MAX_APPLY_BATCH, Workflow, batch_results, confirmation, observe_selected, preview
 
@@ -27,6 +28,7 @@ def changes_view(store, audit, show_plan, progress):
         st.dataframe(overview, hide_index=True, width="stretch")
         st.caption("Select a library in the sidebar to approve and process its changes.")
     aid = audit["id"]
+    import_corrections(store, audit)
     with st.expander("Observe external changes (read-only)"):
         inventory = {b.id: b for b in store.books(aid)}
         observed = st.multiselect("Books to refresh (up to 25)", list(inventory),

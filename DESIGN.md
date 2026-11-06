@@ -33,6 +33,11 @@ acknowledgement precede guarded execution. Calibre checks are separate and read-
 History emphasizes activity, with journals/rollback advanced and unresolved recovery
 prominent. Rendering/navigation perform no remote mutation.
 
+Changes also includes a collapsed **Import AI corrections** panel with a grouped
+recommendation table, prior corrections, and a native-edit checklist. Explicit
+selection stages eligible fields locally. A bounded live comparison runs only
+on request. See [review import](docs/REVIEW_IMPORT.md).
+
 S2 adds Read-only batch evidence inside Advanced / Evidence: selected or
 unattempted audiobooks, 1–25 books per invocation, explicit refresh, saved-run
 resume/cancel and unavailable retry. Coverage describes acquisition outcomes,
