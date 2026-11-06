@@ -5,7 +5,7 @@ from collections import Counter
 import pytest
 from conftest import FakeAdapter, make_book
 
-from abs_manager.models import Book, digest
+from abs_manager.models import Book, digest, same_value, validate_target
 from abs_manager.persistent_state import identity
 from abs_manager.review_import import (
     ALREADY_APPLIED,
@@ -205,8 +205,13 @@ def test_conflicts_do_not_overwrite_approval_and_holds_require_confirmation(sing
     assert not api.writes
 
 
-def test_expanded_fields_use_guarded_apply_and_rollback(single):
-    store, api, aid, doc = single
+def test_expanded_fields_use_guarded_apply_and_rollback(tmp_path):
+    raw = make_book()
+    raw["media"]["metadata"]["publishedYear"] = "2015-07-21"
+    store = Store(tmp_path / "review.sqlite3")
+    api = FakeAdapter([raw])
+    aid = save(store, [raw])
+    doc = example_document(store, aid)
     book = store.books(aid)[0]
     target = {"description": "Édition française\n\n第二段落", "genres": ["Fantasy", "Romance", "Fantasy Romance"],
               "publishedYear": "2026"}
@@ -239,6 +244,7 @@ def test_expanded_fields_use_guarded_apply_and_rollback(single):
     refreshed = save(store, [live.raw])
     assert all(r.disposition == ALREADY_APPLIED for r in review_rows(store, refreshed, document))
     rollback = flow.rollback_preview(oid)
+    assert rollback["payload"]["metadata"]["publishedYear"] == "2015-07-21"
     rid = flow.rollback(rollback, confirmation(rollback, "ROLLBACK"))
     assert store.operation(rid)["state"] == "verified"
     assert Book(api.item(book.id)).write_values(target) == book.write_values(target)
@@ -320,6 +326,96 @@ def test_new_snapshot_compares_exact_item_and_current_values(single):
     raw["relPath"] = "Moved"
     current = save(store, [raw])
     assert review_rows(store, current, document)[0].disposition == "Current item identity changed"
+
+
+def test_reimport_recognizes_manual_author_and_year_changes(tmp_path):
+    raw = make_book(authors=["Brandon Sanderson", "Robert Jordan"])
+    metadata = raw["media"]["metadata"]
+    metadata["publishedYear"] = "2015-07-21"
+    store = Store(tmp_path / "review.sqlite3")
+    aid = save(store, [raw])
+    doc = example_document(store, aid)
+    book = store.book(aid, raw["id"])
+    doc["recommendations"] = [
+        proposal(book, "authors", ["Robert Jordan", "Brandon Sanderson"]),
+        proposal(book, "publication_year", "2015"),
+        proposal(book, "title", "Unrelated correction"),
+    ]
+    document = parse_review(encode(doc))
+    author, year, title = document.proposals
+    assert [r.disposition for r in review_rows(store, aid, document)] == [ALREADY_APPLIED, READY, READY]
+    with pytest.raises(ValueError, match="no longer eligible"):
+        stage_review(store, aid, document, [author.id])
+    stage_review(store, aid, document, [year.id, title.id])
+    metadata["publishedYear"] = "2015"
+    fresh = save(store, [raw])
+    assert [r.disposition for r in review_rows(store, fresh, document)] == [
+        ALREADY_APPLIED, ALREADY_APPLIED, ALREADY_STAGED]
+    assert {r["field"]: r["status"] for r in store.corrections(fresh)} == {
+        "publishedYear": "observed_in_abs", "title": "pending"}
+    assert [f["field"] for f in store.findings(fresh) if f["kind"] == "confirmed_target"] == ["title"]
+    raw["relPath"] = "Moved"
+    assert review_rows(store, save(store, [raw]), document)[0].disposition == "Current item identity changed"
+
+
+@pytest.mark.parametrize("field,left,right", [
+    ("authors", ["A", "B"], ["A"]),
+    ("authors", ["A"], ["A", "B"]),
+    ("authors", ["A", "B"], ["A", "A", "B"]),
+    ("authors", ["A", "B"], ["A", "C"]),
+    ("narrators", ["A", "B"], ["B", "A"]),
+    ("series", [{"name": "A"}, {"name": "B"}], [{"name": "B"}, {"name": "A"}]),
+])
+def test_write_comparison_preserves_material_differences(field, left, right):
+    assert not same_value(field, left, right)
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_author_readback_and_reconciliation_accept_reordering(tmp_path, timeout):
+    raw = make_book(authors=["Robert Jordan"])
+    store = Store(tmp_path / "review.sqlite3")
+    aid = save(store, [raw])
+    api = FakeAdapter([raw])
+    api.mutate_after = lambda item: item["media"]["metadata"]["authors"].reverse()
+    if timeout:
+        api.fail = "after"
+    fid = store.propose(aid, raw["id"], "authors", ["Robert Jordan", "Brandon Sanderson"], "Verified credits")
+    store.review([fid], "approved")
+    plan = preview(store, aid, [fid])
+    flow = Workflow(store, api)
+    if timeout:
+        with pytest.raises(SafetyError, match="uncertain"):
+            flow.apply(plan, confirmation(plan))
+        oid = store.history()[0]["id"]
+        assert flow.reconcile(oid) == "verified"
+    else:
+        oid, = flow.apply(plan, confirmation(plan))
+    assert store.operation(oid)["state"] == "verified"
+    assert len(api.writes) == 1
+
+
+def test_unrestorable_year_is_explicitly_excluded_from_other_changes(tmp_path):
+    raw = make_book()
+    raw["media"]["metadata"]["publishedYear"] = "circa 2015"
+    store = Store(tmp_path / "review.sqlite3")
+    aid = save(store, [raw])
+    with pytest.raises(ValueError, match="four digits"):
+        validate_target("publishedYear", "2015-07-21")
+    store.confirm_targets(aid, raw["id"], {"publishedYear": "2015", "title": "Reviewed title"}, "Evidence")
+    ids = [f["id"] for f in store.findings(aid) if f["kind"] == "confirmed_target"]
+    store.review(ids, "approved")
+    plan = preview(store, aid, ids)
+    exclusion, = plan["exclusions"]
+    assert (exclusion["item_id"], exclusion["field"]) == (raw["id"], "publishedYear")
+    group, = plan["books"]
+    assert group["changes"] == {"title": "Reviewed title"}
+    api = FakeAdapter([raw])
+    flow = Workflow(store, api)
+    title_only = preview(store, aid, group["finding_ids"])
+    with pytest.raises(SafetyError, match="exact confirmation"):
+        flow.apply(plan, confirmation(title_only))
+    flow.apply(plan, confirmation(plan))
+    assert api.writes == [(raw["id"], {"title": "Reviewed title"})]
 
 
 def test_series_replacement_cannot_drop_membership(single):

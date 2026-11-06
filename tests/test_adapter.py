@@ -82,6 +82,12 @@ def test_cli_subprocess_argv_environment_stdin_and_redaction(monkeypatch):
         "metadata": {**changes, "authors": [{"name": "Author One"}, {"name": "Author Two"}]},
     }
     assert "very-secret" not in repr(adapter.settings)
+    original = {"publishedYear": "2015-07-21"}
+    with pytest.raises(ValueError, match="four digits"):
+        adapter.update("uuid-current", original)
+    assert len(calls) == 1
+    adapter.update("uuid-current", original, restoring=True)
+    assert json.loads(calls[-1][1]["input"]) == {"metadata": original}
 
 
 def test_cli_timeout_never_retried(monkeypatch):
@@ -225,6 +231,7 @@ def test_official_cli_against_local_http_simulator(tmp_path, clean_cli_profile):
         pytest.skip("A personal refresh-token config must not be used by the transport write test")
     server = ThreadingHTTPServer(("127.0.0.1", 0), LocalABS)
     server.book = make_book()
+    server.book["media"]["metadata"]["publishedYear"] = "2015-07-21"
     server.requests = []
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -238,6 +245,8 @@ def test_official_cli_against_local_http_simulator(tmp_path, clean_cli_profile):
         aid = run_audit(store, adapter, result["libraries"][0])
         assert not any(r[0] == "PATCH" for r in server.requests)
         ids = [f["id"] for f in store.findings(aid) if f["actionable"]]
+        store.confirm_targets(aid, server.book["id"], {"publishedYear": "2015"}, "Verified year")
+        ids += [f["id"] for f in store.findings(aid) if f["kind"] == "confirmed_target"]
         store.review(ids, "approved")
         plan = preview(store, aid)
         wf = Workflow(store, adapter)
@@ -247,8 +256,9 @@ def test_official_cli_against_local_http_simulator(tmp_path, clean_cli_profile):
         wf.rollback(back, confirmation(back, "ROLLBACK"))
         patches = [r for r in server.requests if r[0] == "PATCH"]
         assert len(patches) == 2
-        assert patches[0][2] == {"metadata": {"title": "Heaven's River"}}
+        assert patches[0][2] == {"metadata": {"title": "Heaven's River", "publishedYear": "2015"}}
         assert patches[1][2]["metadata"]["title"].endswith("Book 4")
+        assert patches[1][2]["metadata"]["publishedYear"] == "2015-07-21"
     finally:
         server.shutdown()
         server.server_close()

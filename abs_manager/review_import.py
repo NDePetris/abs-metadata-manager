@@ -5,7 +5,16 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 
 from .locking import operation_lock
-from .models import FIELDS, Book, compact, digest, target_observed, validate_target
+from .models import (
+    FIELDS,
+    Book,
+    compact,
+    digest,
+    result_matches,
+    same_value,
+    target_observed,
+    validate_target,
+)
 from .persistent_state import identity
 from .workflow import MAX_APPLY_BATCH, SafetyError, guard, library_identity
 
@@ -232,10 +241,10 @@ def _disposition(p, source, active, staged, may_stage, duplicate):
     if target_observed(p.field, p.desired, _value(active, p.field)):
         return ALREADY_APPLIED
     if staged:
-        return ALREADY_STAGED if all(value == p.desired for value in staged) else "Conflicts with staged work"
+        return ALREADY_STAGED if all(same_value(p.field, value, p.desired) for value in staged) else "Conflicts with staged work"
     if p.status == EXISTING:
         return "Prior correction no longer staged"
-    if _value(active, p.field) != p.expected or active.values != source.values:
+    if not same_value(p.field, _value(active, p.field), p.expected) or not result_matches(source.values, active.values, {}):
         return "Current snapshot metadata changed"
     if p.field == "series" and not {s["name"] for s in p.expected} <= {s["name"] for s in p.desired}:
         return "Series membership would be removed"
@@ -338,7 +347,7 @@ def check_live(store, adapter, active_id, document, selected, confirmed=()):
             except (SafetyError, ValueError):
                 results.update((p.id, "Live identity or item unavailable") for p in proposals)
                 continue
-            unchanged = live.values == saved.values and live.protected() == saved.protected()
+            unchanged = result_matches(saved.values, live.values, {}) and live.protected() == saved.protected()
             for p in proposals:
                 results[p.id] = ("Matches saved snapshot" if unchanged else
                                  "Desired value already present in ABS" if target_observed(

@@ -33,7 +33,7 @@ class Adapter(Protocol):
     def libraries(self) -> list[dict]: ...
     def page(self, library: str, page: int, limit: int) -> dict: ...
     def item(self, item_id: str) -> dict: ...
-    def update(self, item_id: str, changes: dict) -> None: ...
+    def update(self, item_id: str, changes: dict, *, restoring: bool = False) -> None: ...
     def check_write_capability(self) -> None: ...
 
 
@@ -268,10 +268,10 @@ class CliAdapter:
         if not isinstance(response, dict) or not isinstance(response.get(key), list):
             raise TypeError("Unexpected response schema.")
 
-    def update(self, item_id: str, changes: dict) -> None:
+    def update(self, item_id: str, changes: dict, *, restoring: bool = False) -> None:
         self.check_write_capability()
         self._run(["items", "update", "--id", item_id, "--stdin"],
-                  json.dumps(payload(changes, restoring=True), ensure_ascii=False))
+                  json.dumps(payload(changes, restoring=restoring), ensure_ascii=False))
 
     def cover(self, item_id: str) -> bytes:
         with tempfile.TemporaryDirectory(prefix="abs-cover-") as temp:
