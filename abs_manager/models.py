@@ -13,15 +13,22 @@ IMPORTED_FIELDS = ("description", "genres", "publishedYear")
 WRITE_FIELDS = FIELDS + IMPORTED_FIELDS
 
 
+def same_value(field, left, right):
+    if (field == "authors" and isinstance(left, list) and isinstance(right, list)
+            and all(isinstance(name, str) for name in left + right)):
+        # ABS updates author membership. Keep names and multiplicity intact.
+        return sorted(left) == sorted(right)
+    return left == right
+
+
 def target_observed(field, desired, observed):
-    """Directional equivalence for an explicit subtitle clear only."""
-    return desired == observed or (field == "subtitle" and desired == "" and observed is None)
+    return same_value(field, desired, observed) or (field == "subtitle" and desired == "" and observed is None)
 
 
 def result_matches(expected, observed, changes):
     return expected.keys() == observed.keys() and all(
         target_observed(field, value, observed[field]) if field in changes and changes[field] == value
-        else value == observed[field] for field, value in expected.items())
+        else same_value(field, value, observed[field]) for field, value in expected.items())
 
 
 def review_fields(is_audio: bool) -> tuple[str, ...]:
@@ -169,8 +176,16 @@ class Book:
 def payload(changes: dict, restoring=False) -> dict:
     if not changes:
         raise ValueError("Empty update.")
-    result = {field: (None if restoring and field in ("title", "subtitle", "description", "publishedYear")
-                      and value is None else validate_target(field, value)) for field, value in changes.items()}
+    result = {}
+    for field, value in changes.items():
+        if restoring and field in ("title", "subtitle", "description", "publishedYear") and value is None:
+            result[field] = None
+        elif (restoring and field == "publishedYear" and isinstance(value, str)
+              and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value)):
+            # ABS stores nonempty publishedYear strings verbatim.
+            result[field] = value
+        else:
+            result[field] = validate_target(field, value)
     if "authors" in result:
         result["authors"] = [{"name": name} for name in result["authors"]]
     return {"metadata": result}

@@ -53,7 +53,7 @@ class FakeAdapter:
     def check_write_capability(self):
         pass
 
-    def update(self, item_id, changes):
+    def update(self, item_id, changes, *, restoring=False):
         if self.check_journal:
             self.check_journal()
         self.writes.append((item_id, copy.deepcopy(changes)))

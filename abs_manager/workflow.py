@@ -6,7 +6,7 @@ from collections.abc import Callable
 from .adapter import Adapter, AdapterError, CliAdapter, InventoryChanged, inventory, membership
 from .diagnostics import event
 from .locking import operation_lock
-from .models import IMPORTED_FIELDS, Book, digest, payload, result_matches, target_observed
+from .models import IMPORTED_FIELDS, Book, digest, payload, result_matches, same_value, target_observed
 from .store import Store
 
 
@@ -34,7 +34,7 @@ def operation_comparison(data, observed):
     for field in sorted(set(before) | set(after)):
         actual = book.write_values(before).get(field) if book else None
         equal = book is not None and (target_observed(field, after.get(field), actual)
-                                     if field in data.get("changes", {}) else after.get(field) == actual)
+                                     if field in data.get("changes", {}) else same_value(field, after.get(field), actual))
         if field in data.get("changes", {}) or not equal:
             rows.append({"Field": field.capitalize(), "Before": show(field, before.get(field)),
                          "Intended": show(field, after.get(field)),
@@ -176,6 +176,7 @@ def preview(store: Store, audit_id: int, selected=None) -> dict:
     if audit["status"] != "complete" or latest["id"] != audit_id or audit["read_only"]:
         raise SafetyError("Only the latest complete live audiobook audit can produce an apply preview.")
     groups = {}
+    exclusions = []
     if selected is not None and (not selected or len(selected) != len(set(selected))):
         raise SafetyError("Duplicate or empty selected fields are not allowed.")
     selected = sorted(selected) if selected is not None else None
@@ -187,14 +188,29 @@ def preview(store: Store, audit_id: int, selected=None) -> dict:
         book = store.book(audit_id, finding["item_id"])
         if not book.is_audio:
             raise SafetyError("Ebooks are read-only. Calibre remains authoritative.")
+        field = finding["field"]
+        current = book.write_values((field,))[field]
+        if not same_value(field, finding["current"], current):
+            raise SafetyError("Proposal source does not match its snapshot.")
+        reason = None
+        if target_observed(field, finding["target"], current):
+            reason = "Desired value already present."
+        elif field in IMPORTED_FIELDS:
+            original = {field: current}
+            try:
+                if payload(original, restoring=True)["metadata"] != original:
+                    raise ValueError("The original value would be converted on rollback.")
+            except ValueError:
+                reason = "The original value cannot be restored exactly."
+        if reason:
+            exclusions.append({"finding_id": finding["id"], "item_id": book.id,
+                               "title": book.values["title"], "field": field, "reason": reason})
+            continue
         group = groups.setdefault(book.id, {"identity": book.identity,
                                             "changes": {}, "finding_ids": [],
                                             "approvals": {}})
-        field = finding["field"]
         if field in group["changes"]:
             raise SafetyError("Multiple approved proposals for the same field. Reset one decision.")
-        if finding["current"] != book.write_values((field,)).get(field):
-            raise SafetyError("Proposal source does not match its snapshot.")
         group["changes"][field] = finding["target"]
         group["finding_ids"].append(finding["id"])
         group["approvals"][str(finding["id"])] = finding["reviewed"]
@@ -203,13 +219,6 @@ def preview(store: Store, audit_id: int, selected=None) -> dict:
         group["before"] = book.write_values(group["changes"])
         group["protected"] = book.protected(group["changes"])
         group["payload"] = payload(group["changes"])
-        restore = {field: group["before"][field] for field in IMPORTED_FIELDS if field in group["changes"]}
-        if restore:
-            try:
-                if payload(restore, restoring=True)["metadata"] != restore:
-                    raise ValueError("The original value would be converted on rollback.")
-            except ValueError as exc:
-                raise SafetyError("An original imported field cannot be restored through ABS. Review the saved value.") from exc
     if groups:
         evidence = {r["item_id"]: r for r in store.verification_report(audit_id)}
         for iid, group in groups.items():
@@ -223,9 +232,13 @@ def preview(store: Store, audit_id: int, selected=None) -> dict:
     result = {"server": audit["server"], "library": audit["library"], "audit_id": audit_id,
               "books": list(groups.values())}
     if selected is not None:
-        if set(selected) != {fid for group in groups.values() for fid in group["finding_ids"]}:
+        accounted = {fid for group in groups.values() for fid in group["finding_ids"]}
+        accounted.update(row["finding_id"] for row in exclusions)
+        if set(selected) != accounted:
             raise SafetyError("Selected approvals changed.")
         result["selected"] = selected
+    if exclusions:
+        result["exclusions"] = exclusions
     result["digest"] = digest(result)
     return result
 
@@ -289,7 +302,7 @@ def observe_selected(store, adapter, audit_id, selected):
 def guard(book: Book, identity: dict, values: dict):
     if book.identity != identity:
         raise SafetyError("Live identity, library, or path changed. Run a fresh audit; no ID migration is allowed.")
-    if book.write_values(values) != values:
+    if not result_matches(values, book.write_values(values), {}):
         raise SafetyError("Live metadata differs from the expected source. Run a fresh audit.")
     if book.raw.get("isMissing") or book.raw.get("isInvalid") or not book.is_audio:
         raise SafetyError("Live item is missing, invalid, or not an audiobook.")
@@ -394,7 +407,7 @@ class Workflow:
         operation_id = self.store.record(server, library, item_id, action, "prepared", data)
         observed = None
         try:
-            self.adapter.update(item_id, data["changes"])
+            self.adapter.update(item_id, data["changes"], restoring=action == "rollback")
             self.store.transition(operation_id, "applied", "Update returned; verification pending.")
             observed = Book(self.adapter.item(item_id))
             verify(observed, data, data["after"], intended=True)
@@ -443,7 +456,10 @@ class Workflow:
         if row["state"] != "verified" or row["action"] != "apply":
             raise SafetyError("Select a verified apply operation that has not been reverted.")
         data = row["data"]
-        changes = {field: data["before"][field] for field in data["changes"]}
+        changes = {field: data["before"][field] for field in data["changes"]
+                   if field != "authors" or not same_value(field, data["before"][field], data["after"][field])}
+        if not changes:
+            raise SafetyError("The recorded update changed only author order. There is no author membership to restore.")
         result = {"server": row["server"], "library": row["library"], "parent": operation_id,
                   "identity": data["identity"],
                   "before": Book(row["observed"]).write_values(changes) if row["observed"] else data["after"],

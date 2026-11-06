@@ -96,6 +96,9 @@ def changes_view(store, audit, show_plan, progress):
     approved = [fid for fid in selected if any(f["id"] == fid and f["status"] == "approved" for f in store.findings(aid))]
     if approved:
         plan = preview(store, aid, approved)
+        for row in plan.get("exclusions", []):
+            st.warning(f"{row['title']} ({row['item_id']}) · {row['field']}. {row['reason']}")
+    if approved and plan["books"]:
         show_plan(plan)
         st.code(confirmation(plan))
         adapter = st.session_state.get("adapter")

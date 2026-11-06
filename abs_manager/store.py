@@ -9,7 +9,7 @@ from pathlib import Path
 from .audit import analyze
 from .diagnostics import event, local_log
 from .locking import operation_lock
-from .models import Book, compact, digest, validate_target
+from .models import Book, compact, digest, same_value, validate_target
 from .persistent_state import PersistentState
 
 
@@ -191,7 +191,7 @@ class Store(PersistentState):
             if not book.is_audio:
                 raise ValueError("Calibre-managed ebooks are read-only.")
             target = validate_target(field, target)
-            if target == book.values[field] or not reason.strip():
+            if same_value(field, target, book.values[field]) or not reason.strip():
                 raise ValueError("Enter a different target and evidence/reason.")
             with self.connect() as db:
                 if db.execute("SELECT 1 FROM findings WHERE audit_id=? AND item_id=? AND field=? "
@@ -220,7 +220,7 @@ class Store(PersistentState):
                 if row["audit_status"] != "complete" or row["audit_id"] != latest or row["read_only"]:
                     raise ValueError("Run a complete live audiobook audit before approving changes.")
                 target = validate_target(row["field"], edited if edited is not None else json.loads(row["target"]))
-                if target == json.loads(row["current"]):
+                if status == "approved" and same_value(row["field"], target, json.loads(row["current"])):
                     raise ValueError("The proposed target equals the current value.")
                 db.execute("UPDATE findings SET status=?, target=?, reviewed=? WHERE id=?",
                            (status, compact(target), now(), finding_id))

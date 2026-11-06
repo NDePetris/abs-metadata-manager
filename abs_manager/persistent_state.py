@@ -13,6 +13,7 @@ from .models import (
     digest,
     result_matches,
     review_fields,
+    same_value,
     target_observed,
     validate_target,
 )
@@ -105,6 +106,7 @@ class PersistentState:
                 targets[field] = validate_target(field, target)
         for field, target in targets.items():
             current = values(book)[field]
+            matches = same_value(field, target, current)
             db.execute("UPDATE corrections SET status='discarded',updated=? WHERE server=? AND library=? "
                        "AND item_id=? AND field=? AND status IN ('pending','edited_in_calibre','verified_in_calibre','needs_review')",
                        (timestamp(), audit["server"], audit["library"], item_id, field))
@@ -113,8 +115,8 @@ class PersistentState:
             db.execute("INSERT INTO field_decision_history(server,library,item_id,identity_digest,field,value,"
                        "value_digest,decision,evidence,source,created,audit_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                        (audit["server"], audit["library"], item_id, ident, field, compact(current), digest(current),
-                        "confirmed" if current == target else "correction_needed", evidence, "human", timestamp(), audit_id))
-            if target != current:
+                        "confirmed" if matches else "correction_needed", evidence, "human", timestamp(), audit_id))
+            if not matches:
                 db.execute("INSERT INTO corrections(server,library,item_id,identity_digest,title,field,current,"
                            "proposed,evidence,status,created,updated,audit_id,accepted) VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)",
                            (audit["server"], audit["library"], item_id, identity(book, field), book.values["title"],
@@ -301,7 +303,8 @@ class PersistentState:
                                       _corrections if _corrections is not None else self.corrections(audit_id))))
             row["valid"] = (row["identity_digest"] == ident or self.expected_transition(
                 audit_id, item_id, self.book(row["audit_id"], item_id))) and (
-                    row["value_digest"] == digest(vals[row["field"]]) or accepted_clear)
+                    row["value_digest"] == digest(vals[row["field"]]) or accepted_clear
+                    or (row["field"] == "authors" and same_value("authors", row["value"], vals["authors"])))
         if history:
             return rows
         result = {}
@@ -364,7 +367,7 @@ class PersistentState:
             ):
                 raise ValueError("The latest complete audit is required.")
             current = values(book)[field]
-            if current == proposed:
+            if same_value(field, current, proposed):
                 raise ValueError("The proposed value is already present.")
             with self.connect() as db:
                 cursor = db.execute(
@@ -481,26 +484,28 @@ class PersistentState:
                     "UPDATE corrections SET status='identity_ambiguous', updated=? WHERE id=?",
                     (timestamp(), row["id"]),
                 )
-            elif row["abs_observed"]:
-                if not target_observed(row["field"], json.loads(row["proposed"]), values(book).get(row["field"])):
+                continue
+            field = row["field"]
+            current = values(book).get(field)
+            proposed = json.loads(row["proposed"])
+            matches_target = target_observed(field, proposed, current)
+            if row["abs_observed"]:
+                if not matches_target:
                     db.execute("UPDATE corrections SET status='needs_review',updated=? WHERE id=?", (timestamp(), row["id"]))
-            elif row["accepted"] and values(book).get(row["field"]) == json.loads(row["current"]) and book.is_audio and row["field"] in WRITE_FIELDS:
+            elif (row["accepted"] and book.is_audio and field in WRITE_FIELDS and not matches_target
+                  and same_value(field, current, json.loads(row["current"]))):
                 db.execute("UPDATE findings SET status='rejected' WHERE audit_id=? AND item_id=? AND field=? AND actionable=1 AND status='pending'",
-                           (audit_id, book.id, row["field"]))
+                           (audit_id, book.id, field))
                 db.execute("INSERT INTO findings(audit_id,item_id,field,kind,current,proposed,confidence,reason,evidence,actionable,target) VALUES(?,?,?,'confirmed_target',?,?,'human',?,'{}',1,?)",
-                           (audit_id, book.id, row["field"], row["current"], row["proposed"], row["evidence"], row["proposed"]))
-            elif row["abs_observed"] is None and (target_observed(
-                row["field"], json.loads(row["proposed"]), values(book).get(row["field"]))
-                if row["accepted"] else values(book).get(row["field"]) == json.loads(row["proposed"])):
+                           (audit_id, book.id, field, compact(current), row["proposed"], row["evidence"], row["proposed"]))
+            elif row["abs_observed"] is None and (matches_target if row["accepted"] else same_value(field, proposed, current)):
                 db.execute(
                     "UPDATE corrections SET abs_observed=?,updated=?, status=CASE WHEN ? THEN 'observed_in_abs' ELSE status END WHERE id=?",
                     (timestamp(), timestamp(), book.is_audio, row["id"]),
                 )
                 if row["accepted"]:
-                    field = row["field"]
-                    value = values(book)[field]
                     db.execute("INSERT INTO field_decision_history(server,library,item_id,identity_digest,field,value,value_digest,decision,evidence,source,created,audit_id) VALUES(?,?,?,?,?,?,?,'confirmed',?,'reconciliation',?,?)",
-                               (audit["server"], audit["library"], book.id, identity(book), field, compact(value), digest(value),
+                               (audit["server"], audit["library"], book.id, identity(book), field, compact(current), digest(current),
                                 "Previously accepted target observed in inventory.", timestamp(), audit_id))
 
     def import_summary(self, audit_id):
