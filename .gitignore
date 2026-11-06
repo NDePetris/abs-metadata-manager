@@ -10,6 +10,8 @@ __pycache__/
 .pytest-tmp*/
 tests/fixtures/private/
 abs-metadata-review-*.json
+audiobookshelf-review-*-approved-recommendations*.json
+native-metadata-checklist.json
 .impeccable/review/
 .impeccable/cache/
 *.log

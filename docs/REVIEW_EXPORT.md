@@ -143,6 +143,5 @@ Keep the original bundle intact. Ask ChatGPT for a separate list of proposed
 changes with the source snapshot ID, library scope fingerprint, bundle digest,
 item ID, identity and managed-value digests, field, expected old value, desired
 value and rationale. Use exact desired values for each book, including the
-complete desired series list where relevant. A future importer will define its
-accepted format and must validate all proposals against local state. Suggestions
-remain untrusted until reviewed and validated in the guarded workflow.
+complete desired series list where relevant. See [Import AI corrections](REVIEW_IMPORT.md)
+for the accepted recommendation format and local validation rules.
