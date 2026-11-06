@@ -70,14 +70,17 @@ def test_cli_subprocess_argv_environment_stdin_and_redaction(monkeypatch):
         calls.append((args, kwargs))
         return SimpleNamespace(stdout='{"updated":true}', stderr="", returncode=0)
     monkeypatch.setattr(subprocess, "run", run)
-    adapter.update("uuid-current", {"authors": ["Author One", "Author Two"], "title": "Title’s punctuation"})
+    changes = {"title": "Title’s punctuation", "description": "Édition\n\n第二段落",
+               "genres": ["Fantasy", "High Fantasy"], "publishedYear": "2026"}
+    adapter.update("uuid-current", {**changes, "authors": ["Author One", "Author Two"]})
     args, kw = calls[0]
     assert args == ["test-cli", "items", "update", "--id", "uuid-current", "--stdin"]
     assert "very-secret" not in str(args)
     assert kw["env"]["ABS_TOKEN"] == "very-secret"
     assert kw["shell"] is False
-    assert set(json.loads(kw["input"])["metadata"]) == {"authors", "title"}
-    assert json.loads(kw["input"])["metadata"]["authors"] == [{"name": "Author One"}, {"name": "Author Two"}]
+    assert json.loads(kw["input"]) == {
+        "metadata": {**changes, "authors": [{"name": "Author One"}, {"name": "Author Two"}]},
+    }
     assert "very-secret" not in repr(adapter.settings)
 
 

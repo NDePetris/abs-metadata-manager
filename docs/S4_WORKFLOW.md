@@ -128,7 +128,8 @@ For native ABS cover edits, observe metadata and explicitly retrieve the cover a
 in S3's gallery. Changed path/version invalidates prior review; changed bytes at the
 same path require retrieval to detect the hash. A saved path is never artwork proof.
 Fresh genres and tags use existing library-scoped preferences and hygiene analysis.
-There is no custom cover, genre/tag, file, chapter or ebook writer.
+Imported audiobook genre replacements use the same guarded writer. Cover, tag,
+file, chapter and ebook changes stay outside that writer.
 
 ## Synthetic benefit and performance
 

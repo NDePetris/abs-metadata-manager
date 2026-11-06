@@ -129,11 +129,12 @@ def isbn_key(value) -> str:
 
 def values(book: Book) -> dict:
     m, media = book.metadata, book.raw["media"]
-    return {**book.values, "translators": names(m.get("translators", m.get("translator"))),
+    return {**book.write_values(("description", "genres", "publishedYear")),
+            "translators": names(m.get("translators", m.get("translator"))),
             "series_position": [sequence(s["sequence"]) for s in book.values["series"]],
             "identifiers": {k: m[k] for k in ("isbn", "asin") if m.get(k)},
             "cover": media.get("coverPath"), "chapters": media.get("chapters", []),
-            "genres": m.get("genres", []), "tags": media.get("tags", []),
+            "tags": media.get("tags", []),
             "embedded": embedded_evidence(book)}
 
 

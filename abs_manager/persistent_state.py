@@ -6,7 +6,16 @@ import json
 from datetime import UTC, datetime
 
 from .locking import operation_lock
-from .models import FIELDS, compact, digest, result_matches, review_fields, target_observed, validate_target
+from .models import (
+    WRITE_FIELDS,
+    compact,
+    correction_fields,
+    digest,
+    result_matches,
+    review_fields,
+    target_observed,
+    validate_target,
+)
 from .verification import QUALITY_FIELDS, values
 
 
@@ -85,14 +94,15 @@ class PersistentState:
         if (audit["read_only"] or audit["status"] != "complete"
                 or self.latest(audit["server"], audit["library"])["id"] != audit_id):
             raise ValueError("Complete the latest live import first.")
-        if not targets or any(f not in review_fields(book.is_audio) for f in targets):
+        if not targets or any(f not in correction_fields(book.is_audio) for f in targets):
             raise ValueError("Select applicable metadata fields.")
+        targets = dict(targets)
         for field, target in targets.items():
             if field == "identifiers":
                 if book.is_audio or not isinstance(target, dict) or set(target) - {"isbn", "asin"} or any(not isinstance(v, str) for v in target.values()):
                     raise ValueError("Identifiers are manual Calibre corrections only.")
             elif target != values(book)[field]:
-                validate_target(field, target)
+                targets[field] = validate_target(field, target)
         for field, target in targets.items():
             current = values(book)[field]
             db.execute("UPDATE corrections SET status='discarded',updated=? WHERE server=? AND library=? "
@@ -132,10 +142,11 @@ class PersistentState:
         for row in self.history(audit["server"]):
             data = row["data"]
             if (row["state"] == "verified" and row["action"] == "apply" and row["library"] == audit["library"]
-                    and row["item_id"] == item_id and data.get("before") == original.values
-                    and result_matches(data.get("after", {}), current.values, data.get("changes", {}))
-                    and data.get("protected") == current.protected()
-                    and data.get("identity") == current.identity and original.protected() == data.get("protected")):
+                    and row["item_id"] == item_id and data.get("before") == original.write_values(data.get("changes", {}))
+                    and result_matches(data.get("after", {}), current.write_values(data["changes"]), data["changes"])
+                    and data.get("protected") == current.protected(data["changes"])
+                    and data.get("identity") == current.identity
+                    and original.protected(data["changes"]) == data.get("protected")):
                 return True
         import copy
         expected = copy.deepcopy(original.raw)
@@ -473,7 +484,7 @@ class PersistentState:
             elif row["abs_observed"]:
                 if not target_observed(row["field"], json.loads(row["proposed"]), values(book).get(row["field"])):
                     db.execute("UPDATE corrections SET status='needs_review',updated=? WHERE id=?", (timestamp(), row["id"]))
-            elif row["accepted"] and values(book).get(row["field"]) == json.loads(row["current"]) and book.is_audio and row["field"] in FIELDS:
+            elif row["accepted"] and values(book).get(row["field"]) == json.loads(row["current"]) and book.is_audio and row["field"] in WRITE_FIELDS:
                 db.execute("UPDATE findings SET status='rejected' WHERE audit_id=? AND item_id=? AND field=? AND actionable=1 AND status='pending'",
                            (audit_id, book.id, row["field"]))
                 db.execute("INSERT INTO findings(audit_id,item_id,field,kind,current,proposed,confidence,reason,evidence,actionable,target) VALUES(?,?,?,'confirmed_target',?,?,'human',?,'{}',1,?)",

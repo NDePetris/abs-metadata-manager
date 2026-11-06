@@ -12,7 +12,9 @@ Report skips, assumptions, risks and checks actually run.
   searches use the existing strictly validated authenticated read-only direct GET;
   other supported ABS operations use abs-cli. Production writes use only
   `abs-cli items update --id ... --stdin` with the allowlisted metadata payload.
-  Never add bulk, file, scan, embed, cover, chapter or genre/tag mutations.
+  Genre changes replace the complete approved list on one audiobook through
+  that same guarded path. Never add bulk, file, scan, embed, cover, chapter or
+  tag mutations.
 - `models.py` separates original JSON, normalized values and identity. Never
   resolve oldLibraryItemId to a new write target. `audit.py` is pure deterministic
   analysis; folder names are evidence, not authority. Preserve contributor roles,

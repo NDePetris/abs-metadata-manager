@@ -8,11 +8,12 @@ from .adapter import AdapterError
 from .locking import BusyError
 from .models import compact
 from .review_import import (
+    ABS_FIELDS,
     ALREADY_APPLIED,
     ALREADY_STAGED,
+    EDITORIAL,
     EXISTING,
     HELD,
-    NATIVE_FIELDS,
     READY,
     check_live,
     parse_review,
@@ -28,7 +29,7 @@ def _label(row):
 
 def _table(rows, live):
     return [{"Author": r.author, "Book": r.title, "Item ID": r.proposal.item_id, "Field": r.proposal.field,
-             "ABS field": NATIVE_FIELDS.get(r.proposal.field, r.proposal.field),
+             "ABS field": ABS_FIELDS.get(r.proposal.field, r.proposal.field),
              "Expected": compact(r.proposal.expected), "Saved current": compact(r.current),
              "Desired": compact(r.proposal.desired),
              "Confidence": r.proposal.confidence, "Review status": r.proposal.status,
@@ -85,7 +86,7 @@ def import_corrections(store, audit):
                           and (confidence is None or confidence == r.proposal.confidence)
                           and (state is None or state == r.disposition)), key=_label)
         normal = {READY, HELD, ALREADY_APPLIED, ALREADY_STAGED, "No change",
-                  "Native edit outstanding", "Editorial review outstanding"}
+                  "Native edit outstanding", EDITORIAL}
         conflicts = [r for r in visible if r.disposition not in normal]
         st.dataframe(_table([r for r in visible if r.disposition in normal], live), hide_index=True, width="stretch")
         if conflicts:
@@ -109,7 +110,7 @@ def import_corrections(store, audit):
                   and r.disposition not in (ALREADY_APPLIED, ALREADY_STAGED, "No change")]
         if native:
             checklist = [{"item_id": r.proposal.item_id, "author": r.author, "book": r.title,
-                          "authority": r.capability, "field": NATIVE_FIELDS.get(r.proposal.field, r.proposal.field),
+                          "authority": r.capability, "field": ABS_FIELDS.get(r.proposal.field, r.proposal.field),
                           "expected_original_value": r.proposal.expected, "saved_current_value": r.current,
                           "complete_desired_value": r.proposal.desired,
                           "review_status": r.proposal.status, "disposition": r.disposition,
@@ -125,19 +126,23 @@ def import_corrections(store, audit):
                                    format_func=lambda pid: _label(held[pid]), key=key + ":held",
                                    help="Select a book only after confirming its recording supports the exact desired narrator credits.") if held else []
         eligible = {r.proposal.id: r for r in new
-                    if r.disposition == READY or r.disposition == HELD and r.proposal.id in confirmed}
+                    if r.disposition in (READY, EDITORIAL) or r.disposition == HELD and r.proposal.id in confirmed}
         selection_key = key + ":selected"
         shown = [r.proposal.id for r in visible if r.proposal.id in eligible]
+        bulk = [pid for pid in shown if eligible[pid].disposition != EDITORIAL]
         chosen = [pid for pid in st.session_state.get(selection_key, []) if pid in eligible]
         cols = st.columns(2)
-        if cols[0].button("Select eligible rows in view", disabled=not shown, key=key + ":all"):
-            chosen = list(dict.fromkeys(chosen + shown))
+        if cols[0].button("Select eligible rows in view", disabled=not bulk, key=key + ":all"):
+            chosen = list(dict.fromkeys(chosen + bulk))
         if cols[1].button("Clear rows in view", disabled=not shown, key=key + ":none"):
             chosen = [pid for pid in chosen if pid not in shown]
         if st.session_state.get(selection_key) != chosen:
             st.session_state[selection_key] = chosen
         selected = st.multiselect("Fields selected for staging", list(eligible),
-                                  format_func=lambda pid: _label(eligible[pid]), key=selection_key)
+                                  format_func=lambda pid: _label(eligible[pid]) + (
+                                      " · Editorial review" if eligible[pid].disposition == EDITORIAL else ""),
+                                  help="Review the full description and select editorial recommendations individually.",
+                                  key=selection_key)
         live_blocked = any(pid in live and live[pid] != "Matches saved snapshot" for pid in selected)
         if live_blocked:
             st.warning("Selected fields include an ABS mismatch or a value already present in ABS. "

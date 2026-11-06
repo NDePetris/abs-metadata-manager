@@ -9,7 +9,7 @@ from test_streamlined import app, page, widget
 from test_verification import FakeSource
 
 from abs_manager.calibre import import_catalog
-from abs_manager.models import FIELDS, Book, digest, payload
+from abs_manager.models import FIELDS, WRITE_FIELDS, Book, digest, payload
 from abs_manager.persistent_state import identity
 from abs_manager.review_export import export_review_bundle
 from abs_manager.store import Store
@@ -120,7 +120,7 @@ def test_complete_metadata_evidence_and_provenance(tmp_path, review_books):
     assert second["current"]["ebook_format"] == {"ebookFormat": "epub", "ext": ".epub"}
     assert second["evidence"]["calibre_binding"]["calibre_id"] == 42
     assert second["evidence"]["references"]["title"][0]["source"] == "Calibre catalog"
-    assert result["authority"]["audiobook"]["guarded_write_fields"] == list(FIELDS)
+    assert result["authority"]["audiobook"]["guarded_write_fields"] == list(WRITE_FIELDS)
     assert result["authority"]["audiobook"]["other_fields"] == "native_or_manual"
     assert result["authority"]["ebook"]["corrections"] == "Calibre"
     assert result["authority"]["ebook"]["guarded_write_fields"] == []
