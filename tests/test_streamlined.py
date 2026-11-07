@@ -150,6 +150,7 @@ def test_changes_ui_requires_exact_confirmation_and_checkbox(setup, monkeypatch)
     at.run()
     assert len(api.writes) == 1 and store.history()[0]["state"] == "verified"
     page(at, "History")
+    widget(at, "checkbox", "Show guarded rollback preview").check().run()
     rollback_phrase = next(c.value for c in at.code if c.value.startswith("ROLLBACK "))
     widget(at, "text_input", "Rollback confirmation").set_value(rollback_phrase)
     widget(at, "checkbox", "Restore the exact previous values shown above.").check()

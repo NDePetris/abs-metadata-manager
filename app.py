@@ -276,9 +276,9 @@ def show_plan(plan):
 def history_view(store):
     st.title("History")
     st.write("Inspect durable intent and observed results. Reconciliation only reads the server; rollback requires confirmation.")
-    with st.expander("Advanced / Troubleshooting", expanded=bool(store.unresolved(st.session_state.get("server", "")))):
+    with st.expander("Advanced / Troubleshooting", expanded=store.has_unresolved(st.session_state.get("server", ""))):
         historical = choose_snapshot(store)
-        if historical:
+        if historical and st.checkbox("Load historical snapshot details"):
             st.dataframe(store.findings(historical["id"]), hide_index=True, width="stretch")
             archived = store.books(historical["id"])
             if archived:
@@ -293,7 +293,7 @@ def history_view(store):
             for row in store.rows(f"SELECT * FROM {table} WHERE server=? AND library=?", (audit["server"], audit["library"])):
                 events.append({"When": row["created"], "Activity": event + ": " + row.get("decision", row.get("status", "")),
                                "Book": row["item_id"], "Why": row["evidence"]})
-        for operation in store.history(audit["server"]):
+        for operation in store.history_summaries(audit["server"], library=audit["library"]):
             if operation["library"] == audit["library"]:
                 events.append({"When": operation["updated"], "Activity": operation["action"] + ": " + operation["state"],
                                "Book": operation["item_id"], "Why": operation["message"]})
@@ -305,26 +305,34 @@ def history_view(store):
                                   (audit["server"], audit["library"])):
             events.append({"When": catalog["imported"], "Activity": "Calibre catalog compared", "Book": "Library", "Why": "Read-only validation"})
         st.dataframe(sorted(events, key=lambda e: e["When"], reverse=True), hide_index=True, width="stretch")
-    with st.expander("Write journals and guarded recovery", expanded=any(r["state"] in ("prepared", "applied", "uncertain") for r in store.history())):
-        rows = store.history()
+    with st.expander("Write journals and guarded recovery", expanded=store.has_unresolved()):
+        rows = store.history_summaries()
         if not rows:
             st.info("No updates have been submitted. Verified, skipped, failed, and uncertain operations appear here.")
             return
         state_filter = st.multiselect("Operation states", sorted({r["state"] for r in rows}))
-        visible = [r for r in rows if not state_filter or r["state"] in state_filter]
+        visible = store.history_summaries(states=state_filter) if state_filter else rows
         st.dataframe([{k: r[k] for k in ("id", "created", "server", "library", "item_id", "action", "state", "message")}
                       for r in visible], hide_index=True, width="stretch")
         if not visible:
             return
-        oid = st.selectbox("Inspect operation", [r["id"] for r in visible],
-                           format_func=lambda oid: next(f"#{oid} · {r['action']} · {r['state']} · {r['item_id']}"
-                                                       for r in visible if r["id"] == oid))
+        labels = {r["id"]: f"#{r['id']} · {r['action']} · {r['state']} · {r['item_id']}" for r in visible}
+        oid = st.selectbox("Inspect operation", list(labels), format_func=labels.get)
         row = store.operation(oid)
         data = row["data"]
         st.write(f"**{row['state']}** · {row['message']}")
         st.dataframe(operation_comparison(data, row["observed"]), hide_index=True, width="stretch")
+        if ("description" in set(data.get("before", {})) | set(data.get("after", {}))
+                and st.checkbox("Show full operation descriptions", key=f"operation_descriptions:{oid}")):
+            from abs_manager.models import Book
+            observed = Book(row["observed"]).write_values(("description",))["description"] if row["observed"] else None
+            for label, text in (("Original description", data.get("before", {}).get("description")),
+                                ("Intended description", data.get("after", {}).get("description")),
+                                ("Observed description", observed)):
+                st.text_area(label, display(text), disabled=True)
         with st.expander("Advanced / Raw operation JSON"):
-            st.json({"intent": data, "observed": row["observed"]})
+            if st.checkbox("Load raw operation JSON", key=f"operation_json:{oid}"):
+                st.json({"intent": data, "observed": row["observed"]})
         adapter = st.session_state.get("adapter")
         connected = adapter is not None and adapter.server == row["server"]
         if row["state"] in ("prepared", "applied", "uncertain"):
@@ -337,9 +345,11 @@ def history_view(store):
             if not connected:
                 st.info("Connect to the original server to preview and confirm a selective rollback.")
                 return
-            wf = Workflow(store, adapter)
-            back = wf.rollback_preview(oid)
             with st.expander("Guarded rollback of this operation"):
+                if not st.checkbox("Show guarded rollback preview", key=f"rollback_preview:{oid}"):
+                    return
+                wf = Workflow(store, adapter)
+                back = wf.rollback_preview(oid)
                 st.write("Rollback restores only these fields and requires the live values to still match the verified applied state.")
                 show_plan(back)
                 expected = confirmation(back, "ROLLBACK")
@@ -347,7 +357,7 @@ def history_view(store):
                 with st.form(f"rollback_{back['digest']}"):
                     phrase = st.text_input("Rollback confirmation")
                     checked = st.checkbox("Restore the exact previous values shown above.")
-                    submit = st.form_submit_button("Restore confirmed fields", disabled=bool(store.unresolved(row["server"])))
+                    submit = st.form_submit_button("Restore confirmed fields", disabled=store.has_unresolved(row["server"]))
                 if submit:
                     if not checked:
                         st.error("Select the explicit rollback confirmation checkbox.")
@@ -405,7 +415,7 @@ def main():
         st.caption(f"Connected · {adapter.server}" if adapter else "Local workspace · disconnected")
         st.divider()
         st.caption("Import → Match & Verify → Changes → History")
-    if any(r["state"] in ("prepared", "applied", "uncertain") for r in store.history()):
+    if store.has_unresolved():
         st.warning("Recovery required. Open History to reconcile before further writes.")
     if message := st.session_state.pop("flash", None):
         st.success(message)

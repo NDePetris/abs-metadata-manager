@@ -79,6 +79,13 @@ def correction_fields(is_audio: bool) -> tuple[str, ...]:
     return WRITE_FIELDS if is_audio else review_fields(False)
 
 
+def description_preview(value, limit=200):
+    """Presentation only. Full values remain in snapshots, targets and write previews."""
+    if isinstance(value, str) and len(value) > limit:
+        return value[:limit] + "… (truncated; inspect full text)"
+    return value
+
+
 def compact(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
