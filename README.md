@@ -205,9 +205,20 @@ unresolved. Reconciliation updates the local journal but never resubmits the wri
 Any later correction needs deliberate approval and a fresh preview/confirmation;
 rollback is also a separately confirmed conditional write.
 
+Description comparison accepts attribute-free `<p>` wrappers and one layer of HTML
+entity encoding only when the complete text and paragraph boundaries match.
+Plain-text paragraphs use blank lines; words, punctuation, whitespace within a
+paragraph and other HTML formatting remain significant. The approved payload is
+sent unchanged. History labels accepted representation differences **Semantically
+equivalent**. For reported description operation **136**, reconnect to the original
+server and explicitly reconcile that entry read-only: it can become verified only
+if the live description, identity, managed values and protected metadata/media all
+pass. This compatibility fix does not inspect or clear production operations on
+startup, retry a write, or establish that operation 136 has been resolved.
+
 A successful CLI submission/exit is not end-to-end verification. Require guarded
 readback and the operator's ABS check, including unrelated state. The last recorded
-production incident is **operation 25**, an approved empty subtitle returned as
+subtitle incident is **operation 25**, an approved empty subtitle returned as
 null. A scoped equivalence fix exists, but the operation remains uncertain in the
 recorded evidence; S1 does not inspect or resolve production state. Follow
 [the incident recovery steps](docs/PRODUCTION_FIXES.md#existing-database-and-operation-25)

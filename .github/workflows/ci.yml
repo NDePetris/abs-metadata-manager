@@ -64,6 +64,7 @@ jobs:
           python -m pytest -ra --durations=10 --junitxml=test-results.xml
           tests/test_adapter.py tests/test_audit.py tests/test_audit_recovery.py
           tests/test_workflow.py tests/test_decision_safety.py tests/test_cli_search_contract.py
+          tests/test_description_readback.py
           tests/test_harness.py
           tests/test_s4_corrections.py tests/test_s4_observation.py
           tests/test_s4_finalization.py
