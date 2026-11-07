@@ -6,7 +6,7 @@ import streamlit as st
 
 from .adapter import AdapterError
 from .locking import BusyError
-from .models import compact
+from .models import compact, description_preview
 from .review_import import (
     ABS_FIELDS,
     ALREADY_APPLIED,
@@ -28,10 +28,13 @@ def _label(row):
 
 
 def _table(rows, live):
+    def value(row, text):
+        return compact(description_preview(text) if row.proposal.field == "description" else text)
+
     return [{"Author": r.author, "Book": r.title, "Item ID": r.proposal.item_id, "Field": r.proposal.field,
              "ABS field": ABS_FIELDS.get(r.proposal.field, r.proposal.field),
-             "Expected": compact(r.proposal.expected), "Saved current": compact(r.current),
-             "Desired": compact(r.proposal.desired),
+             "Expected": value(r, r.proposal.expected), "Saved current": value(r, r.current),
+             "Desired": value(r, r.proposal.desired),
              "Confidence": r.proposal.confidence, "Review status": r.proposal.status,
              "Capability": r.capability, "Disposition": r.disposition, "Live check": live.get(r.proposal.id, "")}
             for r in rows]
@@ -45,7 +48,13 @@ def import_corrections(store, audit):
         data = upload.getvalue()
         key = f"review_import:{audit['id']}:{sha256(data).hexdigest()}"
         try:
-            document = parse_review(data)
+            # Only immutable upload parsing is reused. Re-evaluate saved state on every rerun,
+            # and stage_review/check_live independently revalidate under the workspace lock.
+            parsed = st.session_state.get("parsed_review_upload")
+            if parsed is None or parsed[0] != key:
+                parsed = (key, parse_review(data))
+                st.session_state["parsed_review_upload"] = parsed
+            document = parsed[1]
             rows = review_rows(store, audit["id"], document)
         except ValueError as exc:
             st.error(str(exc))
@@ -98,6 +107,11 @@ def import_corrections(store, audit):
         if details is not None:
             p = visible[details].proposal
             st.text(p.rationale)
+            if p.field == "description":
+                for label, text in (("Original description", p.expected),
+                                    ("Saved current description", visible[details].current),
+                                    ("Proposed description", p.desired)):
+                    st.text_area(label, text if text is not None else "Not set", disabled=True)
             st.json({"expected": p.expected, "saved_current": visible[details].current,
                      "desired": p.desired, "evidence": p.evidence,
                      "declared_write_path": p.write_path}, expanded=False)

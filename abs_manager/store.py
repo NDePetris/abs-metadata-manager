@@ -242,19 +242,55 @@ class Store(PersistentState):
                 db.execute("UPDATE journal SET state='reverted', updated=?, message=? WHERE id=?",
                            (now(), f"Guarded rollback verified by operation {operation_id}.", parent))
 
-    def history(self, server=None):
-        rows = self.rows("SELECT * FROM journal" + (" WHERE server=?" if server else "") + " ORDER BY id DESC",
-                         (server,) if server else ())
+    def history(self, server=None, *, states=None):
+        where, args = self._journal_filter(server, states)
+        return self._decode_operations(self.rows("SELECT * FROM journal" + where + " ORDER BY id DESC", args))
+
+    @staticmethod
+    def _journal_filter(server=None, states=None, library=None):
+        clauses, args = [], []
+        for column, value in (("server", server or None), ("library", library)):
+            if value is not None:
+                clauses.append(column + "=?")
+                args.append(value)
+        if states is not None:
+            clauses.append("state IN (" + ",".join("?" for _ in states) + ")")
+            args.extend(states)
+        return (" WHERE " + " AND ".join(clauses) if clauses else ""), args
+
+    def history_summaries(self, server=None, *, states=None, library=None):
+        """Presentation only: exclude persisted intent and observed metadata entirely."""
+        where, args = self._journal_filter(server, states, library)
+        return self.rows("SELECT id,server,library,item_id,action,state,created,updated,message FROM journal" +
+                         where + " ORDER BY id DESC", args)
+
+    @staticmethod
+    def _decode_operations(rows):
         for row in rows:
             row["data"] = json.loads(row["data"])
             row["observed"] = json.loads(row["observed"]) if row["observed"] else None
         return rows
 
     def operation(self, operation_id):
-        return next(row for row in self.history() if row["id"] == operation_id)
+        return next(iter(self._decode_operations(self.rows("SELECT * FROM journal WHERE id=?", (operation_id,)))))
 
-    def unresolved(self, server):
-        return [r for r in self.history(server) if r["state"] in ("prepared", "applied", "uncertain")]
+    def unresolved(self, server=None):
+        # Safety callers continue to receive complete persisted records.
+        return self.history(server, states=("prepared", "applied", "uncertain"))
+
+    def has_unresolved(self, server=None):
+        where, args = self._journal_filter(server, ("prepared", "applied", "uncertain"))
+        return bool(self.rows("SELECT 1 FROM journal" + where + " LIMIT 1", args))
+
+    def saved_batches(self, server, library):
+        """Batch choices only; load the chosen plan through operation()."""
+        return self.rows("SELECT MAX(id) AS id, json_extract(data,'$.batch_plan.digest') AS digest FROM journal "
+                         "WHERE server=? AND library=? AND json_extract(data,'$.batch_plan.library')=? "
+                         "GROUP BY digest HAVING digest IS NOT NULL ORDER BY id DESC", (server, library, library))
+
+    def batch_operations(self, server, preview_digest):
+        return self.rows("SELECT id,item_id,state FROM journal WHERE server=? AND action='apply' "
+                         "AND json_extract(data,'$.preview_digest')=? ORDER BY id DESC", (server, preview_digest))
 
     def verification_runs(self, audit_id):
         return self.rows("SELECT r.*, COUNT(t.item_id) AS total, COUNT(t.lookup_id) AS done "

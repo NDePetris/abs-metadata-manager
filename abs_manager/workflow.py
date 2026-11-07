@@ -6,7 +6,16 @@ from collections.abc import Callable
 from .adapter import Adapter, AdapterError, CliAdapter, InventoryChanged, inventory, membership
 from .diagnostics import event
 from .locking import operation_lock
-from .models import IMPORTED_FIELDS, Book, digest, payload, result_matches, same_value, target_observed
+from .models import (
+    IMPORTED_FIELDS,
+    Book,
+    description_preview,
+    digest,
+    payload,
+    result_matches,
+    same_value,
+    target_observed,
+)
 from .store import Store
 
 
@@ -28,7 +37,7 @@ def operation_comparison(data, observed):
     def show(field, value, actual=False):
         if field == "subtitle" and data.get("changes", {}).get(field) == "" and value in (None, ""):
             return "Cleared (ABS returned null)" if actual and value is None else "Cleared"
-        return json.dumps(value, ensure_ascii=False)
+        return json.dumps(description_preview(value) if field == "description" else value, ensure_ascii=False)
 
     before, after = data.get("before", {}), data.get("after", {})
     for field in sorted(set(before) | set(after)):
@@ -310,8 +319,7 @@ def guard(book: Book, identity: dict, values: dict):
 
 def batch_results(store, plan):
     """Reconstruct progress from the existing per-item journals after restart."""
-    history = [r for r in store.history(plan["server"]) if r["action"] == "apply"
-               and r["data"].get("preview_digest") == plan["digest"]]
+    history = store.batch_operations(plan["server"], plan["digest"])
     rows = []
     for group in plan["books"]:
         iid = group["identity"]["id"]

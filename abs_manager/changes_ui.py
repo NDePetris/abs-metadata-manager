@@ -3,10 +3,14 @@
 import streamlit as st
 
 from .calibre import import_catalog, reconciliation_states, validate_local
-from .models import correction_fields, review_fields
+from .models import correction_fields, description_preview, digest, review_fields
 from .review_import_ui import import_corrections
 from .verification_ui import display, editor
 from .workflow import MAX_APPLY_BATCH, Workflow, batch_results, confirmation, observe_selected, preview
+
+
+def overview_value(field, value):
+    return display(description_preview(value) if field == "description" else value)
 
 
 def changes_view(store, audit, show_plan, progress):
@@ -23,7 +27,7 @@ def changes_view(store, audit, show_plan, progress):
                 continue
             seen.add(scope)
             overview.extend({"Library": snapshot["name"], "Book": r["title"], "Field": r["field"],
-                             "Desired": display(r["proposed"]), "Status": r["status"]}
+                             "Desired": overview_value(r["field"], r["proposed"]), "Status": r["status"]}
                             for r in store.corrections(snapshot["id"]) if r["status"] not in ("discarded", "observed_in_abs"))
         st.dataframe(overview, hide_index=True, width="stretch")
         st.caption("Select a library in the sidebar to approve and process its changes.")
@@ -41,33 +45,50 @@ def changes_view(store, audit, show_plan, progress):
         st.dataframe(reconciliation_states(store, aid), hide_index=True, width="stretch")
         st.caption("Correct ebook metadata in Calibre, then Validate Calibre Changes. Use native ABS scan/refresh as appropriate for your library settings; observe ABS separately. A Calibre edit does not prove ABS synchronization.")
     rows = [r for r in store.corrections(aid) if r["status"] not in ("discarded", "observed_in_abs")]
-    findings = [f for f in store.findings(aid) if f["actionable"] and f["status"] in ("pending", "approved")
+    all_findings = store.findings(aid)
+    findings = [f for f in all_findings if f["actionable"] and f["status"] in ("pending", "approved")
                 and f["kind"] in ("manual", "external", "confirmed_target")]
     # Legacy approvals remain visible, including approved algorithmic proposals.
-    findings += [f for f in store.findings(aid) if f["actionable"] and f["status"] == "approved"
+    findings += [f for f in all_findings if f["actionable"] and f["status"] == "approved"
                  and f not in findings]
     books = {b.id: b for b in store.books(aid)}
     st.caption(f"Apply at most {MAX_APPLY_BATCH} audiobooks per invocation. Execution stops on the first unsafe or uncertain result.")
     eligible = [f for f in findings if f["item_id"] in books and books[f["item_id"]].is_audio]
-    grouped = st.multiselect("Select staged fields together", [f["id"] for f in eligible],
-                             format_func=lambda fid: next(books[f["item_id"]].values["title"] + " · " + f["field"] + " · " + f["item_id"]
-                                                          for f in eligible if f["id"] == fid))
+    labels = {f["id"]: books[f["item_id"]].values["title"] + " · " + f["field"] + " · " + f["item_id"]
+              for f in eligible}
+    grouped = st.multiselect("Select staged fields together", list(labels), format_func=labels.get)
     rows = [r for r in rows if r["item_id"] not in books or r["field"] in correction_fields(books[r["item_id"]].is_audio)]
     findings = [f for f in findings if f["item_id"] in books and f["field"] in correction_fields(books[f["item_id"]].is_audio)]
     selected = list(grouped)
     st.dataframe([{"Book": books[f["item_id"]].values["title"], "Field": f["field"],
-                   "Current": display(f["current"]), "Target": display(f["target"]), "Status": f["status"]}
+                   "Current": overview_value(f["field"], f["current"]),
+                   "Target": overview_value(f["field"], f["target"]), "Status": f["status"]}
                   for f in eligible], hide_index=True, width="stretch")
+    descriptions = {r["item_id"] for r in rows + findings if r["field"] == "description"}
+    inspected = st.selectbox("Inspect full description correction", sorted(descriptions), index=None,
+                             format_func=lambda iid: books[iid].values["title"] if iid in books else iid,
+                             key=f"description_correction:{aid}") if descriptions else None
+    if inspected is not None:
+        values = [r for r in rows + findings if r["item_id"] == inspected and r["field"] == "description"]
+        for index, row in enumerate(values):
+            detail_key = f"description_detail:{aid}:{inspected}:{index}:{digest(row)}"
+            st.text_area("Original description", display(row["current"]), disabled=True, key=detail_key + ":current")
+            st.text_area("Proposed description", display(row.get("target", row.get("proposed"))),
+                         disabled=True, key=detail_key + ":proposed")
     with st.expander("Individual staged corrections"):
         for iid in dict.fromkeys([r["item_id"] for r in rows] + [f["item_id"] for f in findings]):
             st.subheader(books[iid].values["title"] if iid in books else "Removed book · " + iid)
             whole_book = st.checkbox("Select book for ABS preview", key="whole:" + str(aid) + iid)
             for row in [r for r in rows if r["item_id"] == iid]:
                 st.write(f"**{row['field']}** · {row['status']} · " + ("ABS" if iid in books and books[iid].is_audio else "Calibre / manual"))
-                st.text("Current: " + display(row["current"]) + "\nDesired: " + display(row["proposed"]))
+                st.text("Current: " + overview_value(row["field"], row["current"]) + "\nDesired: " +
+                        overview_value(row["field"], row["proposed"]))
                 st.caption(row["evidence"])
                 st.caption(f"Calibre verified: {row['calibre_verified'] or 'Not checked'} · ABS observed: {row['abs_observed'] or 'Not checked'}")
                 if iid in books and row["field"] in review_fields(books[iid].is_audio) and row["status"] in ("pending", "edited_in_calibre", "verified_in_calibre"):
+                    if row["field"] == "description" and inspected != iid:
+                        st.caption("Select this book in Inspect full description correction to edit its complete text.")
+                        continue
                     with st.form(f"correction:{row['id']}"):
                         target = editor(row["field"], row["proposed"], f"queue:{row['id']}")
                         edit = st.form_submit_button("Confirm edited correction")
@@ -82,7 +103,8 @@ def changes_view(store, audit, show_plan, progress):
                     store.discard_correction(row["id"])
                     st.rerun()
             for finding in [f for f in findings if f["item_id"] == iid]:
-                checked = st.checkbox(f"Select {finding['field']}: {display(finding['target'])}", key=f"select:{finding['id']}")
+                checked = st.checkbox(f"Select {finding['field']}: {overview_value(finding['field'], finding['target'])}",
+                                      key=f"select:{finding['id']}")
                 if (checked or whole_book) and finding["id"] not in selected:
                     selected.append(finding["id"])
     if not rows and not findings:
@@ -93,7 +115,8 @@ def changes_view(store, audit, show_plan, progress):
                "Ebook/manual corrections remain in Individual staged corrections.")
     if st.button("Approve selected fields for ABS preview", disabled=not selected):
         store.review(selected, "approved")
-    approved = [fid for fid in selected if any(f["id"] == fid and f["status"] == "approved" for f in store.findings(aid))]
+    approved_ids = {f["id"] for f in store.findings(aid) if f["status"] == "approved"} if selected else set()
+    approved = [fid for fid in selected if fid in approved_ids]
     if approved:
         plan = preview(store, aid, approved)
         for row in plan.get("exclusions", []):
@@ -105,7 +128,7 @@ def changes_view(store, audit, show_plan, progress):
         with st.form("apply:" + plan["digest"]):
             phrase = st.text_input("Apply confirmation")
             checked = st.checkbox("I approve the exact fields shown and want to write this batch to Audiobookshelf.")
-            submit = st.form_submit_button("Apply confirmed changes", disabled=adapter is None or bool(store.unresolved(audit["server"])))
+            submit = st.form_submit_button("Apply confirmed changes", disabled=adapter is None or store.has_unresolved(audit["server"]))
         if submit:
             if not checked:
                 raise ValueError("Select the explicit confirmation checkbox.")
@@ -115,15 +138,15 @@ def changes_view(store, audit, show_plan, progress):
             finally:
                 st.dataframe(batch_results(store, plan), hide_index=True, width="stretch")
             st.success("Verified in ABS. Refresh Library to observe the updated inventory.")
-    batches = {}
-    for operation in store.history(audit["server"]):
-        saved = operation["data"].get("batch_plan")
-        if saved and saved["library"] == audit["library"]:
-            batches.setdefault(saved["digest"], saved)
-    if batches:
-        with st.expander("Saved batch results"):
-            bid = st.selectbox("Batch fingerprint", list(batches))
-            st.dataframe(batch_results(store, batches[bid]), hide_index=True, width="stretch")
+    with st.expander("Saved batch results"):
+        if st.checkbox("Load saved batch results"):
+            batches = {r["digest"]: r["id"] for r in store.saved_batches(audit["server"], audit["library"])}
+            if batches:
+                bid = st.selectbox("Batch fingerprint", list(batches))
+                saved = store.operation(batches[bid])["data"]["batch_plan"]
+                st.dataframe(batch_results(store, saved), hide_index=True, width="stretch")
+            else:
+                st.caption("No saved batches for this library.")
     if st.button("Validate Calibre Changes"):
         from .preferences import load
         settings = load()
