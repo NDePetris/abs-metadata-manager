@@ -58,6 +58,7 @@ def test_entities_decode_once_and_formatting_is_not_discarded():
     assert not same_value("description", "News �", "<p>News&#0;</p>")
     assert not same_value("description", "News & views", "<p>News &amp views</p>")
     assert not same_value("description", "¬it;", "<p>&notit;</p>")
+    assert not same_value("description", "Roshar’s divided peoples", "<p>RosharΓÇÖs divided peoples</p>")
 
 
 def description_plan(tmp_path):

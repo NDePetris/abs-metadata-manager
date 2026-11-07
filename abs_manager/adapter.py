@@ -270,8 +270,10 @@ class CliAdapter:
 
     def update(self, item_id: str, changes: dict, *, restoring: bool = False) -> None:
         self.check_write_capability()
+        # ASCII JSON escapes preserve exact Unicode values even when the Windows
+        # CLI reads redirected stdin using an OEM code page instead of UTF-8.
         self._run(["items", "update", "--id", item_id, "--stdin"],
-                  json.dumps(payload(changes, restoring=restoring), ensure_ascii=False))
+                  json.dumps(payload(changes, restoring=restoring), ensure_ascii=True))
 
     def cover(self, item_id: str) -> bytes:
         with tempfile.TemporaryDirectory(prefix="abs-cover-") as temp:

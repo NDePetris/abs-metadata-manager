@@ -216,6 +216,14 @@ if the live description, identity, managed values and protected metadata/media a
 pass. This compatibility fix does not inspect or clear production operations on
 startup, retry a write, or establish that operation 136 has been resolved.
 
+CLI update payloads use ASCII JSON Unicode escapes to preserve approved characters
+across Windows stdin code pages; JSON parsing restores the exact original text.
+For example, `Roshar’s` must not become `RosharΓÇÖs`. Such corrupted text remains a
+material difference, including during read-only reconciliation. This transport
+fix does not repair existing ABS descriptions: any correction needs a fresh live
+snapshot, explicit field approval and preview-bound confirmation. Do not retry an
+uncertain operation to repair encoding.
+
 A successful CLI submission/exit is not end-to-end verification. Require guarded
 readback and the operator's ABS check, including unrelated state. The last recorded
 subtitle incident is **operation 25**, an approved empty subtitle returned as
