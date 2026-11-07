@@ -6,6 +6,8 @@ import json
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from html import unescape
+from html.entities import html5
 from typing import Any
 
 FIELDS = ("title", "subtitle", "authors", "narrators", "series")
@@ -13,7 +15,44 @@ IMPORTED_FIELDS = ("description", "genres", "publishedYear")
 WRITE_FIELDS = FIELDS + IMPORTED_FIELDS
 
 
+def description_paragraphs(value: str) -> tuple[str, ...] | None:
+    """Comparison only: accept bare p wrappers, never discard other HTML/formatting.
+
+    Plain-text blank lines delimit paragraphs. Text within each paragraph stays
+    exact (including whitespace, case and punctuation); decode entities once,
+    after recognizing markup, so encoded literal tags remain literal text.
+    Unsupported or malformed markup falls back to exact equality in same_value.
+    """
+    value = value.replace("\r\n", "\n")
+    if re.search(r"<[!/?A-Za-z]", value):
+        paragraph = r"<p>([^<>]*)</p>"
+        if not re.fullmatch(rf"\s*{paragraph}(?:\s*{paragraph})*\s*", value):
+            return None
+        parts = re.findall(paragraph, value)
+    else:
+        parts = value.split("\n\n")
+
+    def decode(match):
+        entity = match[0]
+        if not entity.startswith("&#") and entity[1:] not in html5:
+            return entity
+        if entity.startswith("&#") and len(entity) > 12:
+            return entity
+        decoded = unescape(entity)
+        # HTML's error recovery may discard invalid numeric references. Such
+        # lossy conversion is not evidence that the complete text was saved.
+        if not decoded or any(ord(char) < 32 or char == "\ufffd" for char in decoded):
+            return entity
+        return decoded
+
+    return tuple(re.sub(r"&(?:#[0-9]+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]+);", decode, part)
+                 for part in parts)
+
+
 def same_value(field, left, right):
+    if field == "description" and isinstance(left, str) and isinstance(right, str) and left != right:
+        paragraphs = description_paragraphs(left)
+        return paragraphs is not None and paragraphs == description_paragraphs(right)
     if (field == "authors" and isinstance(left, list) and isinstance(right, list)
             and all(isinstance(name, str) for name in left + right)):
         # ABS updates author membership. Keep names and multiplicity intact.

@@ -78,6 +78,7 @@ def test_cli_subprocess_argv_environment_stdin_and_redaction(monkeypatch):
     assert "very-secret" not in str(args)
     assert kw["env"]["ABS_TOKEN"] == "very-secret"
     assert kw["shell"] is False
+    assert kw["input"].isascii()
     assert json.loads(kw["input"]) == {
         "metadata": {**changes, "authors": [{"name": "Author One"}, {"name": "Author Two"}]},
     }
@@ -88,6 +89,30 @@ def test_cli_subprocess_argv_environment_stdin_and_redaction(monkeypatch):
     assert len(calls) == 1
     adapter.update("uuid-current", original, restoring=True)
     assert json.loads(calls[-1][1]["input"]) == {"metadata": original}
+
+
+@pytest.mark.parametrize("restoring", [False, True])
+@pytest.mark.parametrize("codepage", ["utf-8", "cp437", "cp850", "cp1252"])
+def test_cli_unicode_payload_survives_windows_stdin_codepages(monkeypatch, restoring, codepage):
+    adapter = CliAdapter(Settings("http://localhost:13378", "synthetic-only", "test-cli", .1, 3))
+    adapter.version = "1.2.0"
+    monkeypatch.setattr("abs_manager.adapter.cli_config", dict)
+    target = {"description": "Roshar’s divided peoples — Édition\n\n第二段落 📚",
+              "title": "A ‘quoted’ title", "authors": ["François"], "genres": ["幻想"]}
+    received = []
+
+    def run(args, **kwargs):
+        # Reproduce the actual UTF-8 -> OEM decoding boundary, then parse JSON
+        # as the CLI does. No official binary or production connection is used.
+        wire = kwargs["input"].encode(kwargs["encoding"])
+        assert wire.isascii()
+        received.append(json.loads(wire.decode(codepage)))
+        return SimpleNamespace(stdout='{"updated":true}', stderr="", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    adapter.update("synthetic-id", target, restoring=restoring)
+    assert received == [{"metadata": {**target, "authors": [{"name": "François"}]}}]
+    assert target["description"].startswith("Roshar’s")
 
 
 def test_cli_timeout_never_retried(monkeypatch):
