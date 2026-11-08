@@ -1,24 +1,22 @@
 # Import AI corrections
 
-1. Select the original audiobook library in the sidebar. Open **Changes → Import
-   AI corrections** and upload the existing recommendations JSON.
-2. Review the counts and filter by author, book, field, confidence or
-   disposition. The table shows the expected, saved and desired values.
-   **Recommendation details** shows the rationale and evidence. For example,
+1. Select the original audiobook library in the sidebar. Open **Review → Import AI suggestions** and upload the existing recommendations JSON.
+2. Review the counts and filter by title/author search, field, author, confidence or
+   workflow status. The table shows abbreviated current and suggested values; exact originals remain in the detail evidence.
+   **Recommendation details** shows the rationale, complete descriptions and collapsed evidence. For example,
    choose **genres** to inspect all proposed genre sets together.
 3. Select eligible fields individually or use **Select eligible rows in view**.
    Review each editorial description in **Recommendation details** and select
-   it individually in **Fields selected for staging**. Confirm any held narrator
+   its checkbox individually. Full proposed descriptions can be edited and saved before staging. Confirm any held narrator
    credit against the actual recording before selecting it.
    You can check the selection against live ABS for up to ten books per request.
    This is read-only and leaves the saved snapshot intact.
-4. Click **Stage selected changes locally**. Return to the existing Changes
-   controls for separate field approval, exact preview and confirmation.
+4. Click **Stage selected changes locally**. Open **Stage and apply** below for separate field approval, exact preview and confirmation.
    Apply still uses the guarded writer with its existing ten-book cap, live
    checks, journal, readback and rollback. Unresolved recovery still blocks
    remote execution. Local review and staging are available during recovery
    when the latest live snapshot is complete and the selected fields are clear.
-5. Select up to ten audiobooks in Changes, click **Approve selected fields for
+5. Select up to ten audiobooks in **Review → Stage and apply**, click **Approve selected fields for
    ABS preview**, and inspect **Exact CLI metadata payload**. Enter the displayed
    confirmation phrase, check the approval box and click **Apply confirmed
    changes**. Repeat for the next batch. Refresh the library after application
@@ -31,6 +29,11 @@ can stage against a newer complete live snapshot when the selected books have
 the same identity and managed values and the expected field still matches.
 A moved item, changed recording, unexpected metadata or missing source
 snapshot requires review. Item IDs are never migrated.
+
+Checkbox selection is local UI state, not field approval. Hidden selections survive
+filtering and sorting; bulk selection includes only eligible visible rows and excludes
+editorial descriptions and held narrators. Clear rows in view leaves hidden selections
+intact. Stale/ineligible choices are removed when saved state is revalidated.
 
 ## Accepted review document
 

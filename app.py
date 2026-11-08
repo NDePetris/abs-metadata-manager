@@ -12,6 +12,7 @@ from abs_manager.config import ROOT, Settings, defaults
 from abs_manager.locking import BusyError, operation_lock
 from abs_manager.models import digest
 from abs_manager.review_export import export_review_bundle
+from abs_manager.review_import_ui import import_corrections
 from abs_manager.sample import sample_audit
 from abs_manager.store import Store
 from abs_manager.verification_ui import discover_providers, verification_view
@@ -171,8 +172,8 @@ def choose_snapshot(store):
 
 
 def library_view(store):
-    st.title("Import")
-    st.write("Import saved Audiobookshelf metadata into a local audit snapshot. External catalog searches are a separate step in Match & Verify.")
+    st.title("Library")
+    st.write("Refresh the saved inventory or export metadata for review.")
     adapter, library = st.session_state.get("adapter"), st.session_state.get("library")
     if adapter and library:
         st.write(f"**Connected:** {adapter.server} / {library['name']}")
@@ -274,7 +275,7 @@ def show_plan(plan):
 
 
 def history_view(store):
-    st.title("History")
+    st.title("Activity")
     st.write("Inspect durable intent and observed results. Reconciliation only reads the server; rollback requires confirmation.")
     with st.expander("Advanced / Troubleshooting", expanded=store.has_unresolved(st.session_state.get("server", ""))):
         historical = choose_snapshot(store)
@@ -373,6 +374,37 @@ def active_inventory(store):
                  and a["status"] == "complete"), None)
 
 
+def review_view(store):
+    audit = active_inventory(store)
+    if not audit:
+        st.title("Review")
+        st.info("Open Library to refresh your inventory or load a read-only sample.")
+        return
+    adapter, library = st.session_state.get("adapter"), st.session_state.get("library")
+    heading, refresh = st.columns([4, 1], vertical_alignment="center")
+    heading.title("Review")
+    if refresh.button("Refresh Library", disabled=adapter is None or not library):
+        audit_action(store, adapter, library)
+    st.caption(f"{audit['name']} · {audit['finished'][:16].replace('T', ' ')} UTC · {audit['books']} books · "
+               + ("Connection configured" if adapter else "Disconnected · saved metadata"))
+    findings = store.findings(audit["id"])
+    corrections = store.corrections(audit["id"])
+    staged = [f for f in findings if f["actionable"] and f["status"] in ("pending", "approved")
+              and f["kind"] in ("manual", "external", "confirmed_target")]
+    st.caption(f"{sum(f['status'] == 'pending' for f in staged)} fields ready for approval · "
+               f"{sum(f['status'] == 'approved' for f in staged)} approved fields · "
+               f"{sum(f['status'] == 'applied' for f in findings)} write-verified fields. "
+               "Library observation and quality assessment are separate.")
+    import_corrections(store, audit)
+    # Expanders alone still execute their contents. Explicit controls keep expensive
+    # assessment and editors out of unrelated table/filter reruns.
+    outstanding = [c for c in corrections if c["status"] not in ("discarded", "observed_in_abs")]
+    if st.checkbox("Stage and apply", value=bool(staged or outstanding), key=f"review_apply:{audit['id']}"):
+        changes_view(store, audit, show_plan, progress_bar)
+    if st.checkbox("Quality exceptions / manual metadata review", key=f"review_quality:{audit['id']}"):
+        verification_view(store, active_inventory)
+
+
 def main():
     store = Store(os.getenv("ABS_MM_DB", str(ROOT / "data" / "metadata.sqlite3")))
     if "reconnect_checked" not in st.session_state:
@@ -410,26 +442,24 @@ def main():
                 preferences.save({**saved, "library": chosen})
         else:
             st.session_state.pop("library", None)
-        page = st.radio("Workspace", ["Import", "Match & Verify", "Changes", "History", "Settings"])
+        page = st.radio("Workspace", ["Review", "Library", "Activity", "Settings"])
         adapter = st.session_state.get("adapter")
         st.caption(f"Connected · {adapter.server}" if adapter else "Local workspace · disconnected")
         st.divider()
-        st.caption("Import → Match & Verify → Changes → History")
+        st.caption("Review → Stage → Apply → Done")
     if store.has_unresolved():
-        st.warning("Recovery required. Open History to reconcile before further writes.")
+        st.warning("Recovery required. Open Activity to reconcile before further writes. Do not retry uncertain writes.")
     if message := st.session_state.pop("flash", None):
         st.success(message)
     if error := st.session_state.get("credential_error"):
         st.warning(error)
-    views = {"Import": library_view, "Match & Verify": lambda s: verification_view(s, active_inventory),
-             "Changes": lambda s: changes_view(s, active_inventory(s), show_plan, progress_bar),
-             "History": history_view, "Settings": settings_view}
+    views = {"Review": review_view, "Library": library_view, "Activity": history_view, "Settings": settings_view}
     try:
         views[page](store)
     except (AdapterError, SafetyError, BusyError, ValueError, KeyError) as exc:
         st.error(str(exc))
-        st.caption("Read-only transient requests use up to three attempts. Resume interrupted audits from Import; "
-                   "start fresh if the library changed. Uncertain writes require reconciliation in Reconcile & History and are never retried automatically.")
+        st.caption("Read-only transient requests use up to three attempts. Resume interrupted imports from Library; "
+                   "start fresh if the library changed. Uncertain writes require reconciliation in Activity and are never retried automatically.")
 
 
 if __name__ == "__main__":

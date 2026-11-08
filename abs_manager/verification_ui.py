@@ -470,7 +470,7 @@ def verification_view(store, inventory):
     with st.container(gap="xsmall"):
         audit = inventory(store)
         if not audit:
-            st.info("Refresh a library in Import first.")
+            st.info("Refresh a library in Library first.")
             return
         aid = audit["id"]
         report = store.verification_report(aid)

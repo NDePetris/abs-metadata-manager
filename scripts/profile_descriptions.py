@@ -82,9 +82,9 @@ def benchmark():
             app.session_state["adapter"] = FakeAdapter(raw)
             app.session_state["library"] = {"id": "library-a", "name": "Synthetic", "mediaType": "book"}
             app.run()
-            next(w for w in app.radio if w.label == "Workspace").set_value("Changes")
+            next(w for w in app.radio if w.label == "Workspace").set_value("Review")
             result["changes_overview"] = render(app)
-            next(w for w in app.radio if w.label == "Workspace").set_value("History")
+            next(w for w in app.radio if w.label == "Workspace").set_value("Activity")
             result["history_view"] = render(app)
             upload = AppTest.from_string(f"""
 from abs_manager.store import Store
@@ -96,8 +96,9 @@ import_corrections(store, store.audit({aid}))
             result["recommendations_rerun"] = render(upload)
             next(w for w in upload.selectbox if w.label == "Field").select("description")
             result["recommendations_filter"] = render(upload)
-            next(w for w in upload.multiselect if w.label == "Fields selected for staging").set_value(
-                [document["recommendations"][0]["proposal_id"]])
+            editor_key = upload.dataframe[0].proto.id.split("-", 2)[2]
+            upload.session_state[editor_key] = {"edited_rows": {0: {"Select": True}},
+                                                 "added_rows": [], "deleted_rows": []}
             result["recommendations_selection"] = render(upload)
             # Include the full selected recommendation only through the explicit details control.
             next(w for w in upload.selectbox if w.label == "Recommendation details").select_index(0)

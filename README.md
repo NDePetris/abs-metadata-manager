@@ -16,28 +16,56 @@ The app binds to loopback at http://127.0.0.1:8501. No startup metadata requests
 
 ## Everyday workflow
 
-Match & Verify now starts with **quality exceptions**, not a requirement to accept
-every field. Independent evidence and Calibre authority can establish Pass without
-manual confirmation. Use Quality / Queue filters to find attention/evidence gaps,
-or All books to revisit passing values. Essential bibliographic progress is separate
-from artwork and optional categorization. Cover gallery intentionally retrieves up
-to 12 images and confirms only individually inspected artwork; genre/tag hygiene
-records exact-value library preferences. Make artwork and category corrections in
-native ABS/Calibre. See [S3 results, measurements and limitations](docs/S3_REVIEW.md).
+The default **Review** workspace keeps correction review, local staging and guarded
+application together. Select the library once in the sidebar.
 
-1. **Import:** Refresh Library reads ABS inventory, without a filesystem scan. Resume Import retains checkpoints; restart retains history. The latest completed inventory is displayed automatically. A newer incomplete import still prevents confirmation and writes.
-2. **Match & Verify:** use the searchable Book selector or Previous/Next. Compare **Current in ABS**, **Reference**, and editable **Desired** values in one grid. Current is the imported snapshot, not a live read. Fields begin unselected; editing, Use reference, and Restore current select just that field. Select all includes applicable fields only. **Confirm** saves selected targets locally; **Confirm & Next** advances only after successful atomic confirmation. Unchanged values become human acceptance; changed values enter Changes without write approval. Native name editors retain individual contributors/order; series positions accept decimal text. More review actions contains notes, Reopen Selected and Review Later.
+1. **Review:** open **Import AI suggestions** to upload recommendations JSON. Search
+   title/author, filter by field, author, workflow status or confidence, and sort by
+   book, author, field or priority. Check individual rows or **Select eligible rows
+   in view**. Hidden selections survive filtering and sorting; visible and total
+   selected counts are separate. Confidence supplied by the upload is advisory.
+   Bulk selection excludes editorial descriptions and narrator holds. Open
+   **Recommendation details** for one book's suggestions, full description comparison
+   and description editing. Evidence and source details start collapsed. Save edits,
+   select descriptions individually, then **Stage selected changes locally**.
+2. **Review → Stage and apply:** this section opens by default when pending work
+   exists. Select staged fields in its table, **Approve selected fields for ABS
+   preview**, inspect the exact before/after values and CLI payload, then enter the
+   displayed phrase and acknowledgement. Submit **Apply confirmed changes** only
+   after that review. The existing ten-book limit, live guards, durable journal,
+   readback and recovery remain mandatory. A verified write and a later library
+   observation are separate. The staged book inspector renders only one book's
+   editors; ebook corrections and Calibre validation remain read-only here.
+3. **Review → Quality exceptions / manual metadata review:** explicitly load the
+   existing evidence assessment, searchable book queue and Current / Reference /
+   Desired editor. Strong evidence can establish Pass without accepting every field.
+   Confirm saves local targets; it never approves a write. Previous/Next, contributor
+   roles/order, multiple decimal series, Review Later, provider searches, cover review,
+   category preferences, library correction proposals and completion export remain
+   available. Work evidence cannot establish recording credits. Evidence acquisition
+   and saved-cover retrieval require explicit actions. Drafts retain their existing
+   session/server/library/snapshot/book scope. Quality exceptions count separately
+   from uploaded recommendations and staged corrections.
+4. **Library:** refresh the inventory, resume interrupted imports and export metadata
+   for ChatGPT. A newer incomplete import still prevents confirmation and writes.
+5. **Activity:** chronological imports, decisions and write results. Historical snapshots
+   and journals remain advanced tools. Recovery warnings appear on every page.
+   Reconcile reads live state without retrying writes; rollback requires its own
+   confirmation and unchanged applied state.
+6. **Settings:** connection and Calibre configuration.
 
-   Drafts survive reruns, reference actions, page/book navigation, and provider changes for the exact server/library/import/book. A new import starts fresh drafts, restoring accepted pending corrections before imported values. Drafts live in the current browser session, not across closing/reloading the browser. Copying never confirms or stages a value; missing provider data says Not supplied and cannot clear metadata. A displayed candidate is not an accepted edition. Search / Refine executes a lookup only when Search or Search another source is clicked. Work-only references cannot establish recording credits. Advanced / Evidence contains snapshot dates, raw evidence, rejected candidates and source synchronization details.
-3. **Changes:** review accumulated corrections grouped by book. Edit/discard pending targets, explicitly approve selected ABS fields, inspect the exact selected preview, and enter its confirmation phrase and acknowledgement. Calibre corrections are edited manually in Calibre; Validate Calibre Changes lists its catalog read-only. Calibre verification and subsequent ABS observation are separate states.
-4. **History:** chronological imports and human decisions. Advanced sections expose historical snapshots and write journals. Uncertain operations remain prominently flagged. Reconcile reads live metadata without retrying writes. Rollback requires its own exact confirmation and unchanged applied state.
-5. **Settings:** connection and Calibre paths. The library selection persists across pages and sessions.
+The scope of this first consolidation is AI recommendations, lazy book inspection,
+and the existing guarded application flow. Evidence-derived proposals retain their
+existing panel under Quality exceptions; they are not mixed into the AI table.
+Series-specific filtering and clicking an arbitrary table cell to open details are
+not implemented; use the explicit native detail selector. Uploads and edits live in
+the browser session; save the original JSON privately to reopen it later.
 
 File metadata and folder verification display **Not checked** unless reliable evidence exists. Missing file inspection is not itself an outstanding correction. ABS updates never establish file-embedded correctness.
 
 ### Export for ChatGPT review
 
-Select your library in the sidebar and open **Import**. Check the snapshot
+Select your library in the sidebar and open **Library**. Check the snapshot
 date and book count, then click **Export metadata for ChatGPT** and
 **Download metadata review JSON**. This uses the existing completed snapshot
 without refreshing ABS or searching providers. Review the file for private
@@ -48,7 +76,7 @@ untrusted until reviewed and validated. See the [bundle schema](docs/REVIEW_EXPO
 
 Stop the old app and follow [Backup, restore and uncertain writes](#backup-restore-and-uncertain-writes) for `data/metadata.sqlite3` (or `ABS_MM_DB`). Start this version with the same database path. Schema changes are additive; snapshots, generic annotations, accepted decisions, corrections, and recovery journals remain. Do not delete the database to bypass recovery. Generic legacy annotations and proposals never become human acceptance automatically.
 
-For a cautious first inspection, set `ABS_MM_DB` to a private copy and `ABS_MM_SETTINGS` to a new private directory. Copy only the nonsecret `settings.json` into that directory (not any `.dpapi` files) before launching; this retains the server/library context while preventing saved-key reconnection. Review Import, Match & Verify, Changes, and History. Return to the original database for actual operation; a copied database has an independent lock, so do not operate both against the same server concurrently. No production write is necessary to inspect the redesign.
+For a cautious first inspection, set `ABS_MM_DB` to a private copy and `ABS_MM_SETTINGS` to a new private directory. Copy only the nonsecret `settings.json` into that directory (not any `.dpapi` files) before launching; this retains the server/library context while preventing saved-key reconnection. Review Review, Library, Activity, and Settings. Return to the original database for actual operation; a copied database has an independent lock, so do not operate both against the same server concurrently. No production write is necessary to inspect the redesign.
 
 Fresh imports expire write approvals, while compatible human acceptance and accepted correction targets persist. Exact verified narrator corrections and library/UUID-bound Calibre identifier corrections preserve unrelated valid field acceptance. Unexpected identity/path changes reopen review. Old item IDs are never resolved to new write targets.
 
@@ -66,7 +94,7 @@ Audiobook title, subtitle, authors, narrators, series, description, genres, and 
 
 abs-cli 1.2.0 remains the validated writer. A configured abs-cli refresh token blocks writes because upstream authentication refresh can retry PATCH. This app never removes that token for you. Playback progress, covers, chapters, paths, and files are not written.
 
-Calibre remains authoritative for ebooks. Configure the local executable and library folder, then validate with the fixed `calibredb list --for-machine` command. Numeric IDs are scoped to that library. Persistent library/ID/UUID bindings and corroborating folder/identifier plus work evidence prevent ambiguous verification. Accepted title and author targets are valid corroboration, including when both changed before the first comparison. Contradictory or ambiguous records remain unverified. For an initial ambiguous binding, use Changes / Advanced catalog input to explicitly associate the ebook with a catalog ID and UUID in the exact library context. Unscoped exports are archived evidence only; they cannot associate books or verify fields/corrections. Ebook review excludes narrators. Close Calibre if local access is busy. No unlock, repair, database editing, EPUB editing, or folder mutation is attempted. Advanced catalog upload remains available. Custom columns and unsupported metadata remain manual.
+Calibre remains authoritative for ebooks. Configure the local executable and library folder, then validate with the fixed `calibredb list --for-machine` command. Numeric IDs are scoped to that library. Persistent library/ID/UUID bindings and corroborating folder/identifier plus work evidence prevent ambiguous verification. Accepted title and author targets are valid corroboration, including when both changed before the first comparison. Contradictory or ambiguous records remain unverified. For an initial ambiguous binding, use Review / Stage and apply / Advanced catalog input to explicitly associate the ebook with a catalog ID and UUID in the exact library context. Unscoped exports are archived evidence only; they cannot associate books or verify fields/corrections. Ebook review excludes narrators. Close Calibre if local access is busy. No unlock, repair, database editing, EPUB editing, or folder mutation is attempted. Advanced catalog upload remains available. Custom columns and unsupported metadata remain manual.
 
 Automatic audio tag rewriting, remuxing, direct file inspection, renaming, new providers, scheduling, and AI adjudication are deferred.
 
@@ -190,13 +218,13 @@ $env:ABS_MM_DB = $restoredDb
 ```
 
 Keep only one active workspace against the server. Restore matching settings
-separately or reconnect explicitly. Inspect History, decisions and journals before
+separately or reconnect explicitly. Inspect Activity, decisions and journals before
 any operation. A backup preserves history only up to its capture time: never use
 an older copy to bypass a later uncertain write. If later journals/decisions exist,
 retain the newer recovery set and resolve that history first; do not merge SQLite
 tables manually. If the latest intent is unavailable, stop and report the gap.
 
-Prepared/applied/uncertain operations require **History → Reconcile using live
+Prepared/applied/uncertain operations require **Activity → Reconcile using live
 metadata (read-only)** against the original server. The workflow guards identity,
 library/path, all managed values and unrelated metadata/media. Intended after-state
 becomes verified; exact before-state becomes not_applied and resets its approval;
@@ -209,7 +237,7 @@ Description comparison accepts attribute-free `<p>` wrappers and one layer of HT
 entity encoding only when the complete text and paragraph boundaries match.
 Plain-text paragraphs use blank lines; words, punctuation, whitespace within a
 paragraph and other HTML formatting remain significant. The approved payload is
-sent unchanged. History labels accepted representation differences **Semantically
+sent unchanged. Activity labels accepted representation differences **Semantically
 equivalent**. For reported description operation **136**, reconnect to the original
 server and explicitly reconcile that entry read-only: it can become verified only
 if the live description, identity, managed values and protected metadata/media all

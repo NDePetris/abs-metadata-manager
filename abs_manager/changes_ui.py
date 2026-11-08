@@ -1,10 +1,9 @@
 """Accumulated confirmed corrections, grouped by book."""
-
 import streamlit as st
 
 from .calibre import import_catalog, reconciliation_states, validate_local
-from .models import correction_fields, description_preview, digest, review_fields
-from .review_import_ui import import_corrections
+from .models import description_preview, digest, review_fields
+from .review_table import correction_table
 from .verification_ui import display, editor
 from .workflow import MAX_APPLY_BATCH, Workflow, batch_results, confirmation, observe_selected, preview
 
@@ -14,7 +13,7 @@ def overview_value(field, value):
 
 
 def changes_view(store, audit, show_plan, progress):
-    st.title("Changes")
+    st.subheader("Stage and apply")
     if not audit:
         st.info("Refresh a library first.")
         return
@@ -32,17 +31,17 @@ def changes_view(store, audit, show_plan, progress):
         st.dataframe(overview, hide_index=True, width="stretch")
         st.caption("Select a library in the sidebar to approve and process its changes.")
     aid = audit["id"]
-    import_corrections(store, audit)
     with st.expander("Observe external changes (read-only)"):
         inventory = {b.id: b for b in store.books(aid)}
         observed = st.multiselect("Books to refresh (up to 25)", list(inventory),
                                   format_func=lambda iid: inventory[iid].values["title"])
-        st.caption("Only selected books are reread. Others retain their older values. Write approvals expire. After native artwork changes, retrieve and inspect covers again in Match & Verify.")
+        st.caption("Only selected books are reread. Others retain their older values. Write approvals expire. After native artwork changes, retrieve and inspect covers again in Quality exceptions.")
         adapter = st.session_state.get("adapter")
         if st.button("Observe selected ABS values", disabled=not observed or adapter is None):
             st.session_state["snapshot_choice"] = observe_selected(store, adapter, aid, observed)
             st.rerun()
-        st.dataframe(reconciliation_states(store, aid), hide_index=True, width="stretch")
+        if st.checkbox("Load synchronization assessment", key=f"sync_assessment:{aid}"):
+            st.dataframe(reconciliation_states(store, aid), hide_index=True, width="stretch")
         st.caption("Correct ebook metadata in Calibre, then Validate Calibre Changes. Use native ABS scan/refresh as appropriate for your library settings; observe ABS separately. A Calibre edit does not prove ABS synchronization.")
     rows = [r for r in store.corrections(aid) if r["status"] not in ("discarded", "observed_in_abs")]
     all_findings = store.findings(aid)
@@ -56,14 +55,13 @@ def changes_view(store, audit, show_plan, progress):
     eligible = [f for f in findings if f["item_id"] in books and books[f["item_id"]].is_audio]
     labels = {f["id"]: books[f["item_id"]].values["title"] + " · " + f["field"] + " · " + f["item_id"]
               for f in eligible}
-    grouped = st.multiselect("Select staged fields together", list(labels), format_func=labels.get)
-    rows = [r for r in rows if r["item_id"] not in books or r["field"] in correction_fields(books[r["item_id"]].is_audio)]
-    findings = [f for f in findings if f["item_id"] in books and f["field"] in correction_fields(books[f["item_id"]].is_audio)]
-    selected = list(grouped)
-    st.dataframe([{"Book": books[f["item_id"]].values["title"], "Field": f["field"],
-                   "Current": overview_value(f["field"], f["current"]),
-                   "Target": overview_value(f["field"], f["target"]), "Status": f["status"]}
-                  for f in eligible], hide_index=True, width="stretch")
+    table = [{"id": f["id"], "Book": books[f["item_id"]].values["title"],
+              "Author": ", ".join(books[f["item_id"]].values["authors"]), "Field": f["field"],
+              "Current": overview_value(f["field"], f["current"]),
+              "Suggested": overview_value(f["field"], f["target"]), "Evidence": "Human staged target",
+              "Status": "Approved / ready for preview" if f["status"] == "approved" else "Ready for approval",
+              "Priority": 0 if f["status"] == "pending" else 1} for f in eligible]
+    _, selected = correction_table(table, labels, labels, f"staged:{store.path}:{aid}")
     descriptions = {r["item_id"] for r in rows + findings if r["field"] == "description"}
     inspected = st.selectbox("Inspect full description correction", sorted(descriptions), index=None,
                              format_func=lambda iid: books[iid].values["title"] if iid in books else iid,
@@ -75,8 +73,12 @@ def changes_view(store, audit, show_plan, progress):
             st.text_area("Original description", display(row["current"]), disabled=True, key=detail_key + ":current")
             st.text_area("Proposed description", display(row.get("target", row.get("proposed"))),
                          disabled=True, key=detail_key + ":proposed")
-    with st.expander("Individual staged corrections"):
-        for iid in dict.fromkeys([r["item_id"] for r in rows] + [f["item_id"] for f in findings]):
+    with st.expander("Inspect or edit a staged book / Calibre corrections"):
+        book_ids = list(dict.fromkeys([r["item_id"] for r in rows] + [f["item_id"] for f in findings]))
+        detail_id = st.selectbox("Staged book details", book_ids, index=None,
+                                 format_func=lambda iid: books[iid].values["title"] if iid in books else iid,
+                                 key=f"staged_detail:{aid}")
+        for iid in ([detail_id] if detail_id is not None else []):
             st.subheader(books[iid].values["title"] if iid in books else "Removed book · " + iid)
             whole_book = st.checkbox("Select book for ABS preview", key="whole:" + str(aid) + iid)
             for row in [r for r in rows if r["item_id"] == iid]:
@@ -108,11 +110,11 @@ def changes_view(store, audit, show_plan, progress):
                 if (checked or whole_book) and finding["id"] not in selected:
                     selected.append(finding["id"])
     if not rows and not findings:
-        st.info("No confirmed corrections pending. Verify or edit fields in Match & Verify.")
+        st.info("No staged corrections pending. Review suggestions or open Quality exceptions below.")
     st.caption(f"Selected: {len(selected)} fields across "
                f"{len({f['item_id'] for f in eligible if f['id'] in selected})} audiobooks · "
                f"Excluded from this selection: {len(eligible) - len(selected)} supported fields. "
-               "Ebook/manual corrections remain in Individual staged corrections.")
+               "Ebook/manual corrections remain in the book inspector.")
     if st.button("Approve selected fields for ABS preview", disabled=not selected):
         store.review(selected, "approved")
     approved_ids = {f["id"] for f in store.findings(aid) if f["status"] == "approved"} if selected else set()

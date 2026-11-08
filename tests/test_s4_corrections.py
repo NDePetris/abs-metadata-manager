@@ -185,7 +185,7 @@ def test_grouped_changes_preview_remains_separate_from_writing(tmp_path, monkeyp
     at = app(store, api, monkeypatch)
     page(at, "Changes")
     ids = [f["id"] for f in store.findings(aid) if f["kind"] == "confirmed_target"]
-    widget(at, "multiselect", "Select staged fields together").set_value(ids).run()
+    widget(at, "button", "Select eligible rows in view").click().run()
     widget(at, "button", "Approve selected fields for ABS preview").click().run()
     assert not at.exception and not api.writes
     assert len(preview(store, aid, ids)["books"]) == 2
