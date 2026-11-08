@@ -1,5 +1,28 @@
 # Audiobookshelf Metadata Manager
 
+## Bulk app (new default)
+
+The default launcher now serves a minimal React frontend from FastAPI. Python
+3.12+ is required; Node.js 20.19+ is needed only to build during installation.
+
+```powershell
+.\start.ps1 -Install -InstallCli
+.\start.ps1
+```
+
+Open http://127.0.0.1:8501. Connect using an ABS URL/API key, select a library,
+export JSON, obtain corrections externally, import them, select/edit fields,
+review the exact preview, and explicitly confirm. Ebooks download manual Calibre
+reports. [Schema, workflow, recovery, and first real update](docs/BULK.md).
+
+Use `.\start.ps1 -Legacy` for the preserved application described below. Keep its
+database and the new private `data/bulk` directory; neither is migrated or deleted.
+Production end-to-end validation of the new app is still pending owner approval.
+
+---
+
+## Legacy application reference
+
 A local Windows desktop workspace using Python 3.12+, native Streamlit controls, SQLite, and abs-cli.
 
 See [PRODUCT.md](PRODUCT.md) for Phase 1 goals, [DESIGN.md](DESIGN.md) for current

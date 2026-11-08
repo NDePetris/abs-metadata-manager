@@ -1,0 +1,9 @@
+{
+  "name": "abs-bulk",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {"build": "tsc --noEmit && vite build", "test": "node scripts/check.mjs"},
+  "dependencies": {"react": "^19.2.0", "react-dom": "^19.2.0"},
+  "devDependencies": {"@types/react": "^19.2.0", "@types/react-dom": "^19.2.0", "typescript": "~5.9.3", "vite": "^7.2.0", "@playwright/test": "^1.56.0"}
+}

@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ABS bulk corrections version 1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "snapshot_id",
+    "scope",
+    "items"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "snapshot_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "scope": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "item_id",
+          "identity",
+          "changes"
+        ],
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "identity": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "changes": {
+            "type": "object",
+            "additionalProperties": false,
+            "minProperties": 1,
+            "properties": {
+              "title": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "before",
+                  "after"
+                ],
+                "properties": {
+                  "before": {},
+                  "after": {
+                    "type": "string",
+                    "pattern": "\\S"
+                  }
+                }
+              },
+              "subtitle": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "before",
+                  "after"
+                ],
+                "properties": {
+                  "before": {},
+                  "after": {
+                    "type": "string"
+                  }
+                }
+              },
+              "authors": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "before",
+                  "after"
+                ],
+                "properties": {
+                  "before": {},
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "\\S"
+                    },
+                    "uniqueItems": true
+                  }
+                }
+              },
+              "narrators": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "before",
+                  "after"
+                ],
+                "properties": {
+                  "before": {},
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "\\S"
+                    },
+                    "uniqueItems": true
+                  }
+                }
+              },
+              "series": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "before",
+                  "after"
+                ],
+                "properties": {
+                  "before": {},
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "name",
+                        "sequence"
+                      ],
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "pattern": "\\S"
+                        },
+                        "sequence": {
+                          "anyOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 64,
+                              "pattern": "^[0-9]+(?:\\.[0-9]+)?$"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "description": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "before",
+                  "after"
+                ],
+                "properties": {
+                  "before": {},
+                  "after": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "genres": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "before",
+                  "after"
+                ],
+                "properties": {
+                  "before": {},
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "\\S"
+                    },
+                    "uniqueItems": true
+                  }
+                }
+              },
+              "publishedYear": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "before",
+                  "after"
+                ],
+                "properties": {
+                  "before": {},
+                  "after": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[0-9]{4}$"
+                      },
+                      {
+                        "type": "integer",
+                        "minimum": 1000,
+                        "maximum": 9999
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

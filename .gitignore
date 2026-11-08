@@ -16,3 +16,9 @@ native-metadata-checklist.json
 .impeccable/cache/
 *.log
 *.egg-info/
+frontend/node_modules/
+frontend/dist/
+frontend/test-results/
+abs-library*.json
+abs-corrections*.json
+calibre-corrections*.json

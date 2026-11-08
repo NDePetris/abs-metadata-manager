@@ -7,10 +7,10 @@ name = "abs-metadata-manager"
 version = "0.1.0"
 description = "Local, approval-gated Audiobookshelf metadata review"
 requires-python = ">=3.12"
-dependencies = ["streamlit>=1.66,<2", "requests>=2.32,<3"]
+dependencies = ["streamlit>=1.66,<2", "requests>=2.32,<3", "fastapi>=0.115,<1", "uvicorn>=0.34,<1"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3,<10", "ruff>=0.12,<1"]
+dev = ["pytest>=8.3,<10", "ruff>=0.12,<1", "httpx>=0.28,<1"]
 
 [tool.setuptools.packages.find]
 include = ["abs_manager*"]

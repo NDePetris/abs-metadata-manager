@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from pathlib import Path
 
 from .adapter import Adapter, AdapterError, CliAdapter, InventoryChanged, inventory, membership
+from .bulk import Bulk
 from .diagnostics import event
 from .locking import operation_lock
 from .models import (
@@ -348,6 +350,9 @@ class Workflow:
         self.store, self.adapter = store, adapter
 
     def _ready(self, server: str, library: str):
+        bulk = Bulk(None, Path(self.store.path).parent / "bulk", self.store.path)
+        if any(row["state"] in ("intent", "uncertain") for row in bulk.records().values()):
+            raise SafetyError("Check uncertain bulk results in the bulk app before any legacy write.")
         if self.adapter.server != server:
             raise SafetyError("Connected server differs from this audit/history entry.")
         if self.store.unresolved(server):
