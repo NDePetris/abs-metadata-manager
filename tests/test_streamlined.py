@@ -28,7 +28,13 @@ def app(store, api, monkeypatch):
 
 
 def page(at, label):
-    widget(at, "radio", "Workspace").set_value(label).run()
+    # The legacy service-oriented destinations now live inside Review.
+    destination = {"Import": "Library", "History": "Activity", "Changes": "Review",
+                   "Match & Verify": "Review"}.get(label, label)
+    widget(at, "radio", "Workspace").set_value(destination).run()
+    if label in ("Changes", "Match & Verify") and any(c.label == "Stage and apply" for c in at.checkbox):
+        widget(at, "checkbox", "Stage and apply").set_value(label == "Changes").run()
+        widget(at, "checkbox", "Quality exceptions / manual metadata review").set_value(label == "Match & Verify").run()
     assert not at.exception
 
 
@@ -137,7 +143,7 @@ def test_changes_ui_requires_exact_confirmation_and_checkbox(setup, monkeypatch)
     store.confirm_targets(aid, "current-id", {"title": "Confirmed target"})
     at = app(store, api, monkeypatch)
     page(at, "Changes")
-    widget(at, "checkbox", "Select title: Confirmed target").check().run()
+    widget(at, "button", "Select eligible rows in view").click().run()
     widget(at, "button", "Approve selected fields for ABS preview").click().run()
     assert not at.exception and not api.writes
     phrase = next(c.value for c in at.code if c.value.startswith("APPLY "))

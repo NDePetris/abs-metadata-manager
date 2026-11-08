@@ -61,6 +61,7 @@ def test_interrupted_inventory_keeps_resume_action(setup, monkeypatch):
     interrupted = store.start_audit(api.server, "library-a", "Audio")
     store.finish_audit(interrupted, "interrupted", "Synthetic interruption")
     at = app(store, api, monkeypatch)
+    page(at, "Library")
     assert any(b.label == "Resume Import" for b in at.button)
     page(at, "Match & Verify")
     assert not api.writes

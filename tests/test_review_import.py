@@ -449,7 +449,7 @@ import_corrections(store, store.audit({aid}))
     at.file_uploader[0].upload("synthetic.json", encode(doc), "application/json").run()
     assert not at.exception
     assert store.corrections(aid) == []
-    assert len(widget(at.multiselect, "Fields selected for staging").options) == 3
+    assert len(at.dataframe[0].value) == 4
     widget(at.selectbox, "Field").select("genres").run()
     assert not widget(at.button, "Select eligible rows in view").disabled
     widget(at.selectbox, "Field").select("description").run()
@@ -457,9 +457,9 @@ import_corrections(store, store.audit({aid}))
     widget(at.selectbox, "Field").select("title").run()
     widget(at.button, "Select eligible rows in view").click().run()
     assert not at.exception
-    assert widget(at.multiselect, "Fields selected for staging").value == [doc["recommendations"][0]["proposal_id"]]
+    assert any("1 selected in total" in c.value for c in at.caption)
     widget(at.button, "Clear rows in view").click().run()
-    assert not widget(at.multiselect, "Fields selected for staging").value
+    assert any("0 selected in total" in c.value for c in at.caption)
     widget(at.button, "Select eligible rows in view").click().run()
     widget(at.button, "Stage selected changes locally (1)").click().run()
     assert not at.exception

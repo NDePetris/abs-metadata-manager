@@ -6,55 +6,54 @@ Desktop acceptance sizes are 1024×800 and 1280×800.
 
 ## Current implementation
 
-The collapsed sidebar contains the single global Library selector, Import,
-Match & Verify, Changes, History and Settings, plus connection status. Normal
-pages use the latest completed inventory; historical snapshots are advanced tools.
+The collapsed sidebar contains Review (default), Library, Activity and Settings,
+with a single global Library selector and connection status. Review shows the latest
+completed import date/count and a deliberate Refresh Library action. It does not
+fetch metadata merely by opening or filtering the workspace.
 
-Import shows **Export metadata for ChatGPT** beside the completed snapshot name,
-date and book count. An explicit click prepares a local JSON download, including
-when a newer import is incomplete.
+Review starts with a native correction table after **Import AI suggestions**. The
+uploader and provenance are collapsed. One row represents one proposed field;
+Current and Suggested description values are abbreviated, while the exact text is
+retained for the detail editor and payload. Search, field/author/status/confidence
+filters and book/author/field/priority sorting operate on the same table. Durable
+session selection uses proposal IDs, independent of visible row indices. Bulk
+selection affects only visible eligible rows; hidden selections remain and are
+counted explicitly. Editorial descriptions require individual selection; held
+narrators require explicit recording confirmation and are excluded from bulk.
+Upload confidence is advisory, not independently verified quality.
 
-Match & Verify starts with quality counts and a searchable exception selector,
-ordered by disposition and essential defects, with quality/field/reason filters.
-Historical manual acceptance is labeled separately. All books includes passing books
-in stable title order. Essential bibliographic progress and artwork state are separate.
-Previous/Next, compact candidate
-selection and a Field / Current in ABS / Reference / Desired grid. Keep the three
-value columns readable together. Current is an imported snapshot, not a live read.
-Long text wraps; contributor order and multiple decimal series rows survive editing.
-Fields start unselected. Editing/copying selects a field but does not confirm it.
-Confirm or Confirm & Next accepts selected targets locally; changed targets enter
-Changes without write approval. Advanced / Evidence holds provenance, raw evidence,
-covers and source synchronization. Drafts are scoped to the exact browser session,
-server/library/import/item; compatible durable human decisions can survive imports.
+**Recommendation details** opens one book's suggestions and contributor/series
+context. Full descriptions compare side by side and permit editing before staging.
+Evidence/raw values are collapsed. Editing and checkbox selection do not stage or
+approve anything. **Stage selected changes locally** calls the existing importer
+with its locked validation; imported recommendations remain untrusted.
 
-Changes groups corrections by book. Field approval, exact preview, phrase and
-acknowledgement precede guarded execution. Calibre checks are separate and read-only.
-History emphasizes activity, with journals/rollback advanced and unresolved recovery
-prominent. Rendering/navigation perform no remote mutation.
+**Stage and apply** opens for outstanding work and reuses the existing guarded
+application controls. Its field table uses the same selection behavior. One chosen
+staged book renders its editors; collapsed sections no longer create every book's
+editor eagerly. Field approval, exact preview/payload, digest phrase, acknowledgement,
+ten-book cap, journal, live guards, readback and separately confirmed rollback remain.
+Write-verified field counts derive from consumed findings; later inventory observation
+remains separate. Calibre correction and ABS synchronization are distinct.
 
-Changes also includes a collapsed **Import AI corrections** panel with a grouped
-recommendation table, prior corrections, and a native-edit checklist. Explicit
-selection stages eligible fields locally. A bounded live comparison runs only
-on request. See [review import](docs/REVIEW_IMPORT.md).
+**Quality exceptions / manual metadata review** loads assessment only when requested.
+It preserves the exception queue, Current / Reference / Desired editor, Previous/Next,
+explicit evidence acquisition, edition/narrator review, saved-cover gallery (up to 12),
+scoped category preferences, evidence-derived proposals and owner completion export.
+No report is generated during unrelated recommendation table reruns. Existing high
+confidence quality passes and advanced tools retain their semantics.
 
-S2 adds Read-only batch evidence inside Advanced / Evidence: selected or
-unattempted audiobooks, 1–25 books per invocation, explicit refresh, saved-run
-resume/cancel and unavailable retry. Coverage describes acquisition outcomes,
-separately from matches and quality. Ebooks retain existing Calibre comparisons.
-S3 consumes the engine contract in [docs/S2_ENGINE.md](docs/S2_ENGINE.md).
-An explicit gallery retrieves up to 12 saved covers and confirms only checked,
-inspected images, bound to content hashes. Library genre/tag hygiene has exact-value
-preferences and searchable affected-book lists. Both are collapsed native expanders
-beside the queue; corrections stay in native ABS/Calibre. No retrieval occurs on render.
-See [S3 delivery and limitations](docs/S3_REVIEW.md).
+Library contains refresh/resume/import comparison, export for ChatGPT, the offline
+sample and diagnostics. Activity contains history, historical snapshots, journal
+inspection, reconciliation and guarded rollback. Unresolved recovery warnings remain
+prominent on every page. Normal pages use the latest completed inventory; a newer
+incomplete attempt still blocks staging/approval through existing service guards.
 
-S4 adds collapsed Library correction proposals and Library completion / owner sign-off
-panels beside the existing queue. Native tables show before/after and evidence strength;
-grouped selection saves local targets only. Changes starts with a grouped staged-field
-selector/table; individual editors remain in a collapsed panel. Exact preview approval
-and guarded apply remain separate. Bounded external observation and Calibre validation
-retain distinct authority/sync states. See [S4 workflow](docs/S4_WORKFLOW.md).
+This is a bounded consolidation, not a unified evidence engine. Evidence-derived
+proposal review remains under Quality exceptions, and its individual editor remains
+the established typed field editor. Series filtering and table-cell-driven detail
+navigation are deferred; explicit native detail selectors are used. No custom CSS,
+new routing system, schema, dependency or writer capability was introduced.
 
 ## Quality presentation (implemented in S3)
 

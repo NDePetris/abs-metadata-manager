@@ -61,8 +61,8 @@ def test_large_descriptions_browsing_apply_reconcile_and_rollback(tmp_path, monk
     reads = list(api.reads)
     at = app(store, api, monkeypatch)
     page(at, "Changes")
-    checkbox = next(c for c in at.checkbox if c.label.startswith("Select description:"))
-    assert len(checkbox.label) < 270 and "truncated" in checkbox.label
+    table = at.dataframe[-1].value
+    assert "truncated" in table.iloc[0]["Suggested"] and len(table.iloc[0]["Suggested"]) < 270
     assert not any(original in t.value or target in t.value for t in at.text)
     widget(at, "selectbox", "Inspect full description correction").select("current-id").run()
     assert any(t.value == original for t in at.text_area)
@@ -129,14 +129,14 @@ import_corrections(store, store.audit({aid}))
     at.file_uploader[0].upload("synthetic.json", encode(doc), "application/json").run()
     assert len(parsed) == 1 and not at.exception
     assert not any(t.value == target for t in at.text)
-    table = at.dataframe[1].value
-    assert "truncated" in table.iloc[0]["Desired"] and len(table.iloc[0]["Desired"]) < 300
+    table = at.dataframe[0].value
+    assert "truncated" in table.iloc[0]["Suggested"] and len(table.iloc[0]["Suggested"]) < 300
     widget(at, "selectbox", "Recommendation details").select_index(0).run()
     assert any(t.value == target for t in at.text_area) and len(parsed) == 1
     store.confirm_targets(aid, "current-id", {"description": target}, "Reviewed separately")
     at.run()
-    assert at.dataframe[1].value.iloc[0]["Disposition"] == "Already staged"
-    assert not widget(at, "multiselect", "Fields selected for staging").options
+    assert at.dataframe[0].value.iloc[0]["Status"] == "Staged"
+    assert widget(at, "button", "Stage selected changes locally (0)").disabled
     assert len(parsed) == 1 and not store.history()
     doc["recommendations"][0]["complete_desired_value"] = target + "Changed upload."
     at.file_uploader[0].upload("synthetic.json", encode(doc), "application/json").run()

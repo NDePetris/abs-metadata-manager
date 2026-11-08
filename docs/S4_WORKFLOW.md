@@ -8,7 +8,7 @@ library metadata or operation 25 was opened or changed. #16 requires owner valid
 
 ## Operator path and issue mapping
 
-1. Select the library and its completed inventory. Match & Verify continues to
+1. Select the library and its completed inventory. Review → Quality exceptions continues to
    assess correct fields automatically through S2. No accept-every-field step is added.
 2. Open **Library correction proposals**. Every book is counted exactly once:
    Already acceptable, Proposed corrections (including existing staged work), Needs
@@ -21,14 +21,14 @@ library metadata or operation 25 was opened or changed. #16 requires owner valid
    **Accept selected local targets**. This atomically records existing per-field human
    decisions and stages differences. It does not approve a write. Unselected proposals
    remain unresolved. Existing staged fields are suppressed from new proposals.
-5. In **Changes**, select staged fields together, approve them for preview, inspect
+5. In **Review → Stage and apply**, select staged fields together, approve them for preview, inspect
    the exact selected items/fields/payload, type the digest phrase, check the explicit
    acknowledgement and submit. At most ten books are permitted. The selected/excluded
    field counts remain visible; ebook/manual corrections stay in the individual panel.
 6. Each item is guarded and journaled separately. Stop on any failed/unsafe/uncertain
    result. Saved batch results distinguish Verified applied, Failed without application,
    Blocked, Uncertain, Reverted and Not attempted, including after restart.
-7. Use **Observe external changes (read-only)** for 1–25 selected books, or Import
+7. Use **Observe external changes (read-only)** for 1–25 selected books, or Library
    for a full membership check. Revalidate Calibre separately. Export **Library
    completion and owner sign-off** and resolve remaining exceptions before #16 sign-off.
 
@@ -47,7 +47,7 @@ library metadata or operation 25 was opened or changed. #16 requires owner valid
 
 `correction_plan.py` projects existing `verification_report` fields/matches and audit
 findings; it is not another matcher. `correction_plan_ui.py` adds native controls to
-Match & Verify. No schema, provider, framework, scheduler or dependency was added.
+Review → Quality exceptions. No schema, provider, framework, scheduler or dependency was added.
 The small `_confirm_targets` extraction permits one SQLite transaction for grouped
 staging while preserving existing field validation, decision history and correction rows.
 The journal remains the only write ledger; each operation stores its bounded batch
@@ -97,7 +97,7 @@ they are not fresh observations. New snapshots expire write approvals. This boun
 refresh cannot discover unrelated new/removed inventory; use a full Import for that.
 Unresolved journals block bounded refresh, and full import cannot close correction
 rows for unresolved item operations. Production operation 25 must be reconciled by
-the owner through History, never cleared through native edits or database manipulation.
+the owner through Activity, never cleared through native edits or database manipulation.
 
 Only observed target values close corrections. A later changed value or identity
 reopens review, retaining historic timestamps. Write readback verification and
@@ -205,7 +205,7 @@ Owner acceptance steps, in order:
 
 1. Stop workspace users and follow README's SQLite backup/restore procedure. Keep
    one active workspace/server. Preserve the existing baseline and all later journals.
-2. Open History on the original server. Reconcile operation 25 read-only. If mixed
+2. Open Activity on the original server. Reconcile operation 25 read-only. If mixed
    or unexpected, stop; keep writes blocked and record the issue in #16.
 3. Review both libraries' current inventory totals and source coverage. Refresh only
    deliberately. Export aggregate completion reports privately; compare actual totals.
