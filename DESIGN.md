@@ -1,5 +1,10 @@
 # Design
 
+The bulk rebuild uses one desktop screen with native browser controls, a paginated
+differences table, inline value editing, one explicit confirmation, and progress/results.
+No design system or additional workspaces. The prior experience below remains
+reference for the legacy fallback; it does not govern the new bulk architecture.
+
 Practical native Streamlit desktop workspace. Keep the configured light theme;
 no custom CSS, animation, branding assets, generated comps or mobile-specific UI.
 Desktop acceptance sizes are 1024×800 and 1280×800.

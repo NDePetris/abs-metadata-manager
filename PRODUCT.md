@@ -1,5 +1,14 @@
 # Product
 
+## Approved reset: bulk workflow first
+
+The new default is a separate minimal React/FastAPI bulk tool. Export the whole
+library, use external AI, import strict corrections, review/edit/select differences,
+confirm once, and sequentially update audiobooks with readback. Ebooks produce
+manual Calibre reports. See docs/BULK.md. The older roadmap below describes the
+preserved fallback, not architecture to carry into the rebuild. Individual matching
+and comics remain deferred until real-instance bulk validation succeeds.
+
 A personal Windows desktop workspace for ensuring every audiobook and ebook in
 Audiobookshelf has accurate, clean metadata. Python 3.12+, native Streamlit,
 SQLite and abs-cli. ABS supplies current audiobook state; Calibre is authoritative

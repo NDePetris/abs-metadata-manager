@@ -16,7 +16,7 @@ jobs:
   windows:
     name: Windows full suite and launcher
     runs-on: windows-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     env:
       ABS_MM_DB: ${{ github.workspace }}/.test-tmp-ci/app.sqlite3
       ABS_MM_SETTINGS: ${{ github.workspace }}/.test-tmp-ci/settings
@@ -26,12 +26,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Install locked development environment
         run: |
           python -m venv .venv
           .\.venv\Scripts\python.exe -m pip install -r requirements.lock.txt -e '.[dev]'
       - name: Dependency consistency
         run: .\.venv\Scripts\python.exe -m pip check
+      - name: Build frontend bundle
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Synthetic browser workflow and 500-book responsiveness
+        working-directory: frontend
+        run: npm test
       - name: Ruff
         run: .\.venv\Scripts\python.exe -m ruff check app.py abs_manager tests
       - name: Launcher check (no server or CLI installation)
@@ -45,6 +58,14 @@ jobs:
           name: windows-test-results
           path: test-results.xml
           if-no-files-found: ignore
+      - name: Publish frontend bundle and browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bulk-frontend
+          path: |
+            frontend/dist
+            frontend/test-results
 
   linux:
     name: Linux backend and recovery
@@ -65,6 +86,7 @@ jobs:
           tests/test_adapter.py tests/test_audit.py tests/test_audit_recovery.py
           tests/test_workflow.py tests/test_decision_safety.py tests/test_cli_search_contract.py
           tests/test_description_readback.py
+          tests/test_bulk.py tests/test_bulk_http.py
           tests/test_description_performance.py
           tests/test_harness.py
           tests/test_s4_corrections.py tests/test_s4_observation.py

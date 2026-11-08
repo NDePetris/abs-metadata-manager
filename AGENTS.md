@@ -1,5 +1,16 @@
 # Architecture and safety
 
+## Bulk rebuild (current scope)
+
+The approved bulk rebuild supersedes the Streamlit-only and refresh-in-place
+requirements below for the new application. React/TypeScript/Vite and FastAPI
+implement one bulk screen; `bulk.py` and `bulk_app.py` reuse only independent ABS
+integration/validation helpers. No audit/staging/evidence architecture or new
+database. Snapshots and a minimal durable write journal live in ignored data/bulk.
+The existing application remains the fallback (`start.ps1 -Legacy`). Existing
+transport, identity, confirmation, stale-state, readback, locking and no-retry
+protections still apply. See docs/BULK.md. Individual matching and comics are deferred.
+
 Python 3.12+, native Streamlit, SQLite, pytest. Keep diffs small and scoped. Run
 `python -m pytest -ra` before committing, plus Ruff, `pip check`, and the Windows
 launcher check where available. Tests use synthetic databases/settings, fake
