@@ -19,11 +19,13 @@ $absmm = (Resolve-Path .\.venv\Scripts\absmm.exe).Path
 
 Set $env:ABS_LIBRARY to reuse a library ID. With one accessible book library, export can infer it. An editable install is convenient for this checkout. A regular pip install also includes the report template.
 
+For HTTPS, ABS must present a valid certificate and chain trusted by Requests' default CA bundle. The CLI disables Requests' environment-based configuration, including CA bundle overrides. If TLS validation fails, record the error for live validation.
+
 The CLI always uses the current OS user's ~/.absmm directory, typically %USERPROFILE%\.absmm on Windows. The path is independent of the current directory and the checkout. Keep the same OS account and data directory for all operations on your server. Back up this directory and never replace a journal with an older copy to clear a pending operation.
 
 ## Review and apply
 
-1. Share only the printed export JSON and [PROMPT.md](PROMPT.md) with the external reviewer. Keep the private snapshot, manifest, report, approvals, and journal local.
+1. Share only the printed export JSON and [PROMPT.md](PROMPT.md) with the external reviewer. Keep the private snapshot, manifest, report, approvals, and journal local. Keep ABS_TOKEN set in the review shell so the CLI can detect that credential if it appears in the corrections.
 2. Run the commands below. Open the printed HTML path directly in your browser. Search for a book, author, or field, inspect exceptions, expand descriptions, and select the desired rows. Edit titles and descriptions as ordinary text. Enter JSON for lists and nullable values, for example ["Fantasy", "High Fantasy"] or null. After editing, you can deselect the row. Download approvals before closing the report.
 3. Apply from an interactive terminal. Inspect the exact values shown and type the displayed APPLY phrase. Before the first eligible update on that server, confirm a current ABS backup. If a result is uncertain, run check to reconcile it before applying more changes.
 
@@ -33,7 +35,7 @@ The CLI always uses the current OS user's ~/.absmm directory, typically %USERPRO
 & $absmm check
 ~~~
 
-The limit counts distinct books. The CLI groups their selected fields into one update per book. Items beyond the limit are reported as unattempted. A stale live item is skipped. An uncertain response stops the run. Once the journal shows a resolution, inspect the results before starting another run.
+The limit counts distinct selected books in ascending ABS item ID order, regardless of the order shown in the HTML report or approval file. The CLI groups selected fields into one update per book. Items beyond the limit are reported as unattempted. A stale live item is skipped. An uncertain response stops the run. Once the journal shows a resolution, inspect the results before starting another run.
 
 Only after personally inspecting a still-unresolved operation in ABS, use the following command to explicitly abandon it. This records your reason and does not change ABS.
 
@@ -48,7 +50,7 @@ The tool guards the GET and PATCH with a local lock. ABS can still change betwee
 Record completion in the live-validation notes or PR. The checklist is an operator prerequisite.
 
 - Back up ABS /config and /metadata and historical local app data.
-- Use the archived applications' recovery instructions to check for unresolved entries in the legacy SQLite journal and bulk JSONL journal. Resolve outstanding writes using read-only reconciliation. Preserve both journals.
+- Check both historical journals using their archived recovery instructions. For the Streamlit SQLite journal, see **Backup, restore and uncertain writes** in the README at `legacy-final` (`9f51a87`). Run `git show legacy-final:README.md`. For the React/FastAPI bulk JSONL journal, see **Failed writes and restart** in `docs/BULK.md` at `bulk-final` (`db2904a`). Run `git show bulk-final:docs/BULK.md`. Resolve outstanding writes using read-only reconciliation and preserve both journals.
 - Verify the earlier bulk title correction in ABS and retire the historical writers for this server.
 - Confirm the intended library with export --list-libraries. Check the installed version and the previously verified item using read-only GETs. Substitute the current ID from that journal. Confirm the title, library, expanded authors, narrators, series, tags, and audio or ebook files.
 
@@ -64,7 +66,10 @@ $absBook.media | Select-Object tags, audioFiles, ebookFile
 Remove-Variable absHeaders, absBook
 ~~~
 
-After explicit approval, export the real library and apply one legitimate title correction. Verify the title and protected metadata in ABS and inspect the journal. Review and approve a five-book batch separately. Skip production experimentation when no legitimate correction is needed.
+1. Run `absmm check` and resolve any outstanding CLI operations by readback. Export the real library and generate the HTML review for one legitimate title correction.
+2. In the HTML report, deselect any other changes and select exactly that one title correction. Confirm the selected count is one, then download the approval JSON.
+3. After explicit approval of the exact change, run `absmm apply` with that approval file. Verify that the preview names the intended item and contains only the intended change. Enter the displayed confirmation and acknowledge the backup if prompted.
+4. Check the journal and independently verify the title and protected metadata in ABS. If the result is uncertain, run `absmm check` before proceeding. Review and approve a five-book batch separately. Skip production experimentation when no legitimate correction is needed.
 
 ## Development
 

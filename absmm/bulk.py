@@ -13,15 +13,21 @@ def book_libraries(adapter):
     return [library for library in adapter.libraries() if library.get("mediaType") == "book"]
 
 
-def matches(live, data, after=False):
+def observe(live, data):
+    """Classify an ABS read against the original and target, with identical safety checks."""
     before = Book(data["raw"])
-    fields = data["changes"]
-    expected = before.values | (fields if after else {})
-    return (
-        live.identity == before.identity and live.writable
-        and state_matches(expected, live.values, membership_only=after and "authors" in fields)
-        and live.protected(fields) == before.protected(fields)
-    )
+    changes = data["changes"]
+    if (
+        not live.writable or live.identity != before.identity
+        or live.protected(changes) != before.protected(changes)
+    ):
+        return "unexpected"
+    original, observed = before.values, live.values
+    if state_matches(original | changes, observed, author_membership_only="authors" in changes):
+        return "target"
+    if state_matches(original, observed):
+        return "original"
+    return "unexpected"
 
 
 def verified_message(live, targets):
@@ -37,7 +43,7 @@ class Bulk:
         self.lock = directory / "workspace"
         self.journal = directory / "writes.jsonl"
 
-    def export(self, library):
+    def export(self, library, progress=None):
         with operation_lock(self.lock):
             known = book_libraries(self.adapter)
             if library is None and len(known) == 1:
@@ -45,7 +51,14 @@ class Bulk:
             if not any(row["id"] == library for row in known):
                 raise ValueError("Select a book library with --library or ABS_LIBRARY. Use --list-libraries for IDs.")
             members = membership(self.adapter, library)
-            books = list(inventory(self.adapter, members))
+            total = len(members)
+            books = []
+            if progress:
+                progress(0, total)
+            for processed, book in enumerate(inventory(self.adapter, members), start=1):
+                books.append(book)
+                if progress and (processed % 25 == 0 or processed == total):
+                    progress(processed, total)
             if membership(self.adapter, library) != members:
                 raise ValueError("Library changed during export. Export again.")
             snapshot_id = uuid4().hex
@@ -116,9 +129,10 @@ class Bulk:
             }
             try:
                 live = Book(self.adapter.item(item_id))
-                if matches(live, data, after=True):
+                observed_state = observe(live, data)
+                if observed_state == "target":
                     state, message = "already_applied", verified_message(live, changes)
-                elif matches(live, data):
+                elif observed_state == "original":
                     state, message = "intent", ""
                 else:
                     state, message = "conflict", "Live identity or protected metadata changed. Export again."
@@ -140,7 +154,7 @@ class Bulk:
             try:
                 self.adapter.update(item_id, changes)
                 observed = Book(self.adapter.item(item_id))
-                if not matches(observed, data, after=True):
+                if observe(observed, data) != "target":
                     raise ValueError("Readback mismatch.")
                 state, message = "verified", verified_message(observed, changes)
             except AdapterError as exc:
@@ -168,9 +182,10 @@ class Bulk:
                     continue
                 try:
                     live = Book(self.adapter.item(data["item_id"]))
-                    if matches(live, data, after=True):
+                    observed_state = observe(live, data)
+                    if observed_state == "target":
                         state, message = "verified", verified_message(live, data["changes"])
-                    elif matches(live, data):
+                    elif observed_state == "original":
                         state, message = "not_applied", "Original state observed."
                 except AdapterError as exc:
                     message = str(exc)

@@ -9,7 +9,10 @@ class BusyError(RuntimeError):
 
 @contextmanager
 def operation_lock(workspace: str | Path):
-    """Use one OS-held workspace lock with automatic release on process exit."""
+    """Keep export, apply, and recovery from overlapping across CLI processes.
+
+    The OS releases the lock on exit; the journal keeps any unresolved intent.
+    """
     path = Path(workspace).resolve().with_suffix(".operation.lock")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as stream:

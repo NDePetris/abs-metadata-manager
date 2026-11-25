@@ -46,6 +46,22 @@ def read_json(path, limit=INPUT_LIMIT):
     return strict_json(content.decode("utf-8-sig"))
 
 
+def contains_token(value, token):
+    if not token:
+        return False
+    pending = [value]
+    while pending:
+        entry = pending.pop()
+        if isinstance(entry, dict):
+            pending.extend(entry)
+            pending.extend(entry.values())
+        elif isinstance(entry, list):
+            pending.extend(entry)
+        elif isinstance(entry, str) and token in entry:
+            return True
+    return False
+
+
 def identifier(value, length):
     if not isinstance(value, str) or not re.fullmatch(rf"[0-9a-f]{{{length}}}", value):
         raise ValueError("Invalid local artifact identifier.")

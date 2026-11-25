@@ -16,6 +16,7 @@ WRITE_FIELDS = FIELDS + ("description", "genres", "tags", "publishedYear", "asin
 def description_paragraphs(value: str) -> tuple[str, ...] | None:
     """Comparison only: accept bare p wrappers, never discard other HTML/formatting.
 
+    ABS can return submitted plain text as HTML paragraphs with encoded entities.
     Plain-text blank lines delimit paragraphs. Text within each paragraph stays
     exact (including whitespace, case and punctuation); decode entities once,
     after recognizing markup, so encoded literal tags remain literal text.
@@ -59,12 +60,13 @@ def same_value(field, left, right):
     return left == right
 
 
-def state_matches(expected, observed, membership_only=False):
-    return all(
-        expected[field] == observed[field] if field == "authors" and not membership_only
-        else same_value(field, expected[field], observed[field])
-        for field in WRITE_FIELDS
-    )
+def state_matches(expected, observed, *, author_membership_only=False):
+    fields = WRITE_FIELDS
+    if not author_membership_only:
+        if expected["authors"] != observed["authors"]:
+            return False
+        fields = (field for field in WRITE_FIELDS if field != "authors")
+    return all(same_value(field, expected[field], observed[field]) for field in fields)
 
 
 def compact(value: Any) -> str:
@@ -132,7 +134,10 @@ class Book:
 
     def __post_init__(self):
         raw = self.raw
-        if not raw.get("id") or not raw.get("libraryId") or not (raw.get("relPath") or raw.get("path")):
+        if (
+            not isinstance(raw, dict) or not raw.get("id") or not raw.get("libraryId")
+            or not (raw.get("relPath") or raw.get("path"))
+        ):
             raise ValueError("Item lacks a current ID, library, or path; refusing to infer identity.")
         if raw.get("mediaType") != "book":
             raise ValueError("Only book items are supported.")

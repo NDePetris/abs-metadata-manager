@@ -414,3 +414,150 @@ def test_duplicate_items_invalid_fields_and_missing_factual_evidence(tmp_path):
     doc["items"][0]["changes"]["coverPath"] = doc["items"][0]["changes"]["authors"]
     with pytest.raises(ValueError, match="read-only"):
         generate(tmp_path, doc)
+
+def test_review_reports_independent_errors_and_writes_no_artifacts(tmp_path, monkeypatch, capsys):
+    api = FakeAdapter([
+        make_book(item_id="book-a", title="Book A"), make_book(item_id="book-b", title="Book B"),
+    ])
+    _, _, exported, doc = prepare(tmp_path, api)
+    first, second = exported["books"]
+    propose(doc, first, "title", "")
+    propose(doc, first, "narrators", ["Narrator"], before=["Wrong"], evidence="Untrusted submitted text")
+    propose(doc, first, "genres", ["Fantasy"])
+    propose(doc, second, "publishedYear", "tomorrow")
+    doc["items"].append({"item_id": "missing-book", "identity": "", "changes": {}})
+    monkeypatch.setattr(cli, "data_directory", lambda: tmp_path)
+    assert cli.main(["review", str(put(tmp_path / "corrections.json", doc))]) == 1
+    out = capsys.readouterr()
+    assert not out.out
+    assert "Correction validation failed (4 errors)" in out.err
+    assert '$.items[0].changes.title (item ID book-a, book "Book A", field title)' in out.err
+    assert "$.items[0].changes.narrators" in out.err and "Before value does not match" in out.err
+    assert '$.items[1].changes.publishedYear (item ID book-b, book "Book B", field publishedYear)' in out.err
+    assert "$.items[2] (item ID missing-book, item-level)" in out.err
+    assert "Untrusted submitted text" not in out.err and "/books/" not in out.err
+    assert not list(tmp_path.glob("review-*"))
+
+
+def test_cli_error_exit_codes_and_credential_redaction(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "data_directory", lambda: tmp_path)
+    monkeypatch.setenv("ABS_TOKEN", TEST_TOKEN)
+    monkeypatch.setenv("ABS_URL", "https://test.invalid")
+    with pytest.raises(SystemExit) as error:
+        cli.main(["apply", "approvals.json", "--limit", TEST_TOKEN])
+    assert error.value.code == 2
+    report = capsys.readouterr().err
+    assert TEST_TOKEN not in report and "[redacted]" in report
+
+    assert cli.main(["review", str(tmp_path / f"{TEST_TOKEN}.json")]) == 1
+    report = capsys.readouterr().err
+    assert TEST_TOKEN not in report and "[redacted]" in report
+
+    monkeypatch.delenv("ABS_TOKEN")
+    monkeypatch.delenv("ABS_URL")
+    assert cli.main(["check", "--abandon", "a" * 32]) == 1
+    assert "--abandon requires --reason" in capsys.readouterr().err
+
+
+def test_review_rejects_configured_credential_before_generating_artifacts(tmp_path, monkeypatch, capsys):
+    _, _, exported, doc = prepare(tmp_path)
+    propose(doc, exported["books"][0], "title", "Harmless title", evidence=f"Source reference {TEST_TOKEN}")
+    monkeypatch.setenv("ABS_TOKEN", TEST_TOKEN)
+    monkeypatch.setattr(cli, "data_directory", lambda: tmp_path)
+    path = put(tmp_path / "corrections.json", doc)
+    assert cli.main(["review", str(path)]) == 1
+    out = capsys.readouterr()
+    assert "Corrections contain the configured credential." in out.err
+    assert TEST_TOKEN not in out.err and TEST_TOKEN not in out.out
+    assert not list(tmp_path.glob("review-*"))
+
+
+@pytest.mark.parametrize("kind", ["manifest", "raw-edit", "decoded-edit"])
+def test_apply_rejects_credentials_before_prompt_or_patch(tmp_path, monkeypatch, capsys, kind):
+    api = FakeAdapter([make_book(item_id="a"), make_book(item_id="b")])
+    _, _, exported, doc = prepare(tmp_path, api)
+    propose(doc, exported["books"][0], "title", "Safe first book")
+    propose(doc, exported["books"][1], "tags", ["Fantasy"],
+            evidence=TEST_TOKEN if kind == "manifest" else "User cataloging convention")
+    _, manifest = generate(tmp_path, doc)
+    selected = [{"change_id": row["change_id"]} for row in manifest["rows"]]
+    if kind == "raw-edit":
+        selected[1]["edit"] = f'["{TEST_TOKEN}"]'
+    if kind == "decoded-edit":
+        selected[1]["edit"] = r'["\u0073ynthetic-abs-credential"]'
+    path = approve(tmp_path, manifest, selected)
+    monkeypatch.setenv("ABS_TOKEN", TEST_TOKEN)
+    monkeypatch.setenv("ABS_URL", api.server)
+    monkeypatch.setattr(cli, "data_directory", lambda: tmp_path)
+    monkeypatch.setattr(cli, "ask", lambda _: pytest.fail("Credential reached a write prompt"))
+    # A credential in rows beyond --limit still invalidates the approval.
+    assert cli.main(["apply", str(path), "--limit", "1"]) == 1
+    out = capsys.readouterr()
+    assert "contains the configured credential" in out.err
+    assert TEST_TOKEN not in out.err and TEST_TOKEN not in out.out
+    assert not (tmp_path / "writes.jsonl").exists()
+
+
+def test_export_progress_reports_intermediate_counts_to_stderr(tmp_path, monkeypatch, capsys):
+    api = FakeAdapter([make_book(item_id=f"book-{i}") for i in range(55)])
+    with simulator(api) as url:
+        monkeypatch.setenv("ABS_URL", url)
+        monkeypatch.setenv("ABS_TOKEN", TEST_TOKEN)
+        monkeypatch.setattr(cli, "data_directory", lambda: tmp_path)
+        assert cli.main(["export", "--library", "library-a"]) == 0
+    out = capsys.readouterr()
+    assert "55 books exported" in out.out
+    assert out.err.splitlines()[1:] == [
+        "Processed 0/55 books.", "Processed 25/55 books.", "Processed 50/55 books.", "Processed 55/55 books.",
+    ]
+
+
+def test_readback_and_check_keep_protected_file_changes_unresolved(tmp_path, monkeypatch, capsys):
+    book = make_book()
+    book["libraryFiles"] = [{"ino": "original-file"}]
+    bulk, api, exported, doc = prepare(tmp_path, FakeAdapter([book]))
+    propose(doc, exported["books"][0], "title", "Correct title")
+    _, manifest = generate(tmp_path, doc)
+    api.mutate_after = lambda item: item.update(libraryFiles=[{"ino": "unexpected-file"}])
+    assert apply(bulk, approve(tmp_path, manifest))[0][1] == "uncertain"
+    original_journal = bulk.journal.read_bytes()
+    monkeypatch.setattr(cli, "data_directory", lambda: tmp_path)
+    monkeypatch.setattr(cli, "HttpAdapter", lambda *_: api)
+    assert cli.main(["check"]) == 1
+    assert "uncertain" in capsys.readouterr().out
+    assert bulk.journal.read_bytes() == original_journal
+    api.items["current-id"]["libraryFiles"] = book["libraryFiles"]
+    assert cli.main(["check"]) == 0
+    assert "verified" in capsys.readouterr().out
+    assert len(api.writes) == 1
+
+
+def test_recovery_read_failure_and_abandonment_failures_leave_pending_intact(tmp_path, monkeypatch, capsys):
+    bulk, api, exported, doc = prepare(tmp_path)
+    propose(doc, exported["books"][0], "title", "Correct title")
+    _, manifest = generate(tmp_path, doc)
+    api.fail = "after"
+    assert apply(bulk, approve(tmp_path, manifest))[0][1] == "uncertain"
+    op_id = next(iter(records(bulk.journal)))
+    original_journal = bulk.journal.read_bytes()
+    monkeypatch.setattr(cli, "data_directory", lambda: tmp_path)
+    monkeypatch.setattr(cli, "HttpAdapter", lambda *_: api)
+
+    def read_failed(_):
+        raise AdapterError("ABS GET returned HTTP 503.")
+
+    monkeypatch.setattr(api, "item", read_failed)
+    assert cli.main(["check"]) == 1
+    assert "HTTP 503" in capsys.readouterr().out
+    monkeypatch.setattr(cli, "ask", lambda _: pytest.fail("Invalid abandonment should not prompt"))
+    assert cli.main(["check", "--abandon", "a" * 32, "--reason", "Inspection"]) == 1
+    assert "Choose an unresolved operation" in capsys.readouterr().err
+    api.server = "http://wrong.invalid"
+    assert cli.main(["check", "--abandon", op_id, "--reason", "Inspection"]) == 1
+    assert "Reconnect to the original ABS server" in capsys.readouterr().err
+    api.server = "http://test.invalid"
+    monkeypatch.setattr(cli, "ask", lambda _: False)
+    assert cli.main(["check", "--abandon", op_id, "--reason", "Inspection"]) == 1
+    assert "Explicit abandonment confirmation" in capsys.readouterr().err
+    assert bulk.journal.read_bytes() == original_journal
+    assert len(api.writes) == 1

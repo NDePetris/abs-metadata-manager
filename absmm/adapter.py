@@ -5,6 +5,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
+from .files import contains_token
 from .models import Book, payload
 
 
@@ -66,16 +67,9 @@ class HttpAdapter:
             raise AdapterError("ABS GET returned invalid JSON.") from None
         if not isinstance(data, dict):
             raise AdapterError("ABS GET returned an unexpected response shape.")
-        if self.token in response.text or self.contains_token(data):
+        if self.token in response.text or contains_token(data, self.token):
             raise AdapterError("ABS GET echoed credentials. Response discarded.")
         return data
-
-    def contains_token(self, value):
-        if isinstance(value, dict):
-            return any(self.contains_token(k) or self.contains_token(v) for k, v in value.items())
-        if isinstance(value, list):
-            return any(self.contains_token(entry) for entry in value)
-        return isinstance(value, str) and self.token in value
 
     def libraries(self):
         libraries = self._request("GET", "/api/libraries").get("libraries")
