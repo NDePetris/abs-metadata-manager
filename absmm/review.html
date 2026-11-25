@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'">
+<title>Audiobook metadata review</title>
+<style>
+  :root { color-scheme: light; font: 15px/1.5 system-ui, sans-serif; color: #1a2522; }
+  body { margin: 0; background: #f5f6f2; }
+  main { width: min(1440px, calc(100% - 48px)); margin: 44px auto; }
+  h1 { font-size: clamp(1.7rem, 3vw, 2.5rem); letter-spacing: -.035em; margin: 0; }
+  p { margin: .45rem 0; }
+  .intro { color: #43534c; max-width: 74ch; }
+  .controls { display: flex; align-items: end; flex-wrap: wrap; gap: .6rem 1rem; margin: 1.5rem 0 .6rem; }
+  .search { flex: 1 1 240px; max-width: 380px; }
+  .search input { display: block; width: 100%; margin-top: .2rem; }
+  button, input, textarea { box-sizing: border-box; font: inherit; color: inherit; }
+  input[type=search], textarea { border: 1px solid #75867e; border-radius: 5px; background: white; padding: .4rem .6rem; }
+  input[type=checkbox] { accent-color: #16553e; width: 1rem; height: 1rem; vertical-align: -.18em; }
+  button { cursor: pointer; padding: .4rem .7rem; border: 1px solid #75867e; background: white; border-radius: 5px; }
+  button:disabled { opacity: .55; cursor: default; }
+  .download { background: #16553e; color: white; border-color: #16553e; margin-left: auto; font-weight: 600; }
+  :focus-visible { outline: 3px solid #186b9c; outline-offset: 2px; }
+  .summary { color: #43534c; margin-bottom: .8rem; }
+  .table-wrap { overflow: auto; border: 1px solid #ced6ce; border-radius: 8px; background: white; }
+  table { border-collapse: collapse; width: 100%; min-width: 980px; text-align: left; }
+  th, td { padding: .7rem .75rem; border-bottom: 1px solid #dce2db; vertical-align: top; }
+  thead { background: #e7eee7; }
+  tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
+  tr[data-selected] { background: #eff8f1; }
+  .book { width: 16%; }
+  .values { width: 34%; }
+  .reason { width: 27%; }
+  .flag { color: #743911; font-weight: 600; }
+  .muted { color: #43534c; font-size: .9rem; margin: .18rem 0 0; }
+  .comparison { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: .65rem; }
+  .value { white-space: pre-wrap; overflow-wrap: anywhere; margin: .2rem 0; }
+  details { margin-top: .25rem; }
+  summary { cursor: pointer; color: #164e39; font-weight: 600; }
+  textarea { display: block; width: 100%; min-width: 10rem; margin: .4rem 0; resize: vertical; }
+  @media (max-width: 640px) { main { width: calc(100% - 24px); margin: 20px auto; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Audiobook metadata review</h1>
+  <p class="intro">Review the proposed changes, then download your selection for the CLI. Changes to items
+    with an attached ebook also affect its shared Audiobookshelf metadata.</p>
+  <section class="controls" aria-label="Find and select changes">
+    <label class="search">Search <input id="search" type="search" placeholder="Book, author, or field"></label>
+    <label><input id="exceptions" type="checkbox"> Exceptions only</label>
+    <label><input id="selected-only" type="checkbox"> Selected only</label>
+    <button id="select" type="button">Select visible</button>
+    <button id="clear" type="button">Deselect visible</button>
+    <button id="download" class="download" type="button">Download approvals</button>
+  </section>
+  <p id="count" class="summary" role="status"></p>
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Correction table">
+    <table>
+      <thead><tr>
+        <th scope="col">Apply</th><th scope="col" class="book">Book</th><th scope="col">Field</th>
+        <th scope="col" class="values">Current and proposed</th>
+        <th scope="col" class="reason">Reason and evidence</th><th scope="col">Review</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <p id="empty" hidden>No changes match the current filters.</p>
+</main>
+<script id="review-data" type="application/json"><!-- REVIEW_DATA --></script>
+<script>
+"use strict";
+const review = JSON.parse(document.getElementById("review-data").textContent);
+const byId = (id) => document.getElementById(id);
+const rows = byId("rows");
+const search = byId("search");
+const exceptions = byId("exceptions");
+const selectedOnly = byId("selected-only");
+const select = byId("select");
+const clear = byId("clear");
+const download = byId("download");
+const jsonFields = new Set(["authors", "narrators", "series", "genres", "tags", "subtitle", "asin"]);
+const labels = { publishedYear: "Publication year", asin: "ASIN" };
+
+function child(parent, tag, text, css) {
+  const element = document.createElement(tag);
+  if (text !== undefined) element.textContent = text;
+  if (css) element.className = css;
+  parent.append(element);
+  return element;
+}
+
+function display(value) {
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+function comparison(parent, before, after) {
+  const columns = child(parent, "div", undefined, "comparison");
+  for (const [label, value] of [["Current", before], ["Proposed", after]]) {
+    const column = child(columns, "div");
+    child(column, "small", label, "muted");
+    child(column, "p", display(value), "value");
+  }
+}
+
+const changes = review.rows.map((change) => {
+  const row = child(rows, "tr");
+  const label = labels[change.field] || change.field;
+  const checkbox = child(child(row, "td"), "input");
+  checkbox.type = "checkbox";
+  checkbox.setAttribute("aria-label", "Apply " + label + " for " + change.title);
+  checkbox.checked = change.selected;
+  checkbox.disabled = change.blocked;
+  const book = child(row, "th", change.title || "(Untitled)");
+  book.scope = "row";
+  child(book, "p", change.authors.join(", "), "muted");
+  child(row, "td", label);
+  const values = child(row, "td");
+  if (change.field === "description") {
+    const detail = child(values, "details");
+    child(detail, "summary", "Compare full descriptions");
+    comparison(detail, change.before, change.after);
+  } else {
+    comparison(values, change.before, change.after);
+  }
+  const reason = child(row, "td", change.reason);
+  if (change.evidence) child(reason, "p", change.evidence, "muted");
+  child(reason, "p", "Source · " + change.source, "muted");
+  const flags = child(row, "td", change.confidence);
+  for (const flag of change.flags) child(flags, "p", flag, "flag");
+
+  const entry = {
+    change, row, checkbox, visible: true, edit: undefined,
+    search: [change.title, ...change.authors, label, change.field].join(" ").toLocaleLowerCase()
+  };
+  if (!change.blocked) {
+    const editor = child(values, "details");
+    child(editor, "summary", "Edit proposed value");
+    const labelElement = child(editor, "label", jsonFields.has(change.field) ? "Replacement (JSON)" : "Replacement");
+    const input = child(labelElement, "textarea");
+    input.rows = change.field === "description" ? 5 : 2;
+    input.value = jsonFields.has(change.field) ? JSON.stringify(change.after, null, 2) : display(change.after);
+    const original = input.value;
+    input.addEventListener("input", () => {
+      entry.edit = input.value === original ? undefined : input.value;
+      checkbox.checked = true;
+      refresh();
+    });
+  }
+  checkbox.addEventListener("change", refresh);
+  return entry;
+});
+
+function refresh() {
+  let visible = 0, selected = 0, canSelect = false, canClear = false;
+  const query = search.value.trim().toLocaleLowerCase();
+  for (const entry of changes) {
+    const checked = entry.checkbox.checked;
+    entry.visible = entry.search.includes(query)
+      && (!exceptions.checked || entry.change.flags.length > 0 || entry.change.confidence !== "high")
+      && (!selectedOnly.checked || checked);
+    entry.row.hidden = !entry.visible;
+    entry.row.toggleAttribute("data-selected", checked);
+    if (checked) selected++;
+    if (entry.visible) {
+      visible++;
+      if (!entry.checkbox.disabled && !checked) canSelect = true;
+      if (checked) canClear = true;
+    }
+  }
+  byId("count").textContent = visible + " of " + changes.length + " shown · " + selected + " selected";
+  byId("empty").hidden = visible !== 0;
+  select.disabled = !canSelect;
+  clear.disabled = !canClear;
+  download.disabled = selected === 0;
+}
+
+search.addEventListener("input", refresh);
+exceptions.addEventListener("change", refresh);
+selectedOnly.addEventListener("change", refresh);
+select.addEventListener("click", () => {
+  for (const entry of changes) if (entry.visible && !entry.checkbox.disabled) entry.checkbox.checked = true;
+  refresh();
+});
+clear.addEventListener("click", () => {
+  for (const entry of changes) if (entry.visible) entry.checkbox.checked = false;
+  refresh();
+});
+download.addEventListener("click", () => {
+  const approvals = changes.filter((entry) => entry.checkbox.checked && !entry.checkbox.disabled).map((entry) => {
+    const approval = {change_id: entry.change.change_id};
+    if (entry.edit !== undefined) approval.edit = entry.edit;
+    return approval;
+  });
+  const content = JSON.stringify({manifest_digest: review.manifest_digest, approvals}, null, 2);
+  const url = URL.createObjectURL(new Blob([content], {type: "application/json"}));
+  const anchor = document.createElement("a");
+  anchor.setAttribute("href", url);
+  anchor.download = "approvals-" + review.manifest_digest + ".json";
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+refresh();
+</script>
+</body>
+</html>
